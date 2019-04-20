@@ -35,14 +35,10 @@ __status__ = 'PROTOTYPE'
 def set_options():
     """Define options for the program."""
     parser = optparse.OptionParser()
-    parser.add_option("-c", "--clear", action="store_true", default=False, help="Clear all playlists.")
     parser.add_option("-f", "--file", action="store",
             dest="file", help="Send a file")
-    parser.add_option("-r", "--receive", action="store_true",
-            help="Receive a file")
     (options, _) = parser.parse_args()
-    if options.file is None and options.receive is False\
-            and options.clear is False:
+    if options.file is None:
         print(parser.parse_args(['--help']))
     else:
         return options
@@ -57,8 +53,4 @@ if __name__ == "__main__":
         S.clear_data()
         encoded = C.encode_payload(options.file)
         S.populate_playlist(encoded)
-    elif options.receive:
-        results = S.retrieve_playlist()
-        decoded = C.decode_payload(results)
-        if decoded:
-            print(decoded)
+

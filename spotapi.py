@@ -13,6 +13,7 @@ import os
 import spotipy  # pylint: disable=E0401
 import spotipy.util as util
 import sys
+import html
 
 
 __author__ = '@sourcefrenchy'
@@ -61,21 +62,27 @@ class Spot(object):
         print("[*] Data cleared")
 
     def retrieve_playlist(self):
-        """Returns details from a playlist."""
+        """Returns details from playists.
+        Concatenate all to recompose the payload"""
         playlists = self.spotipy.user_playlists(self.username)
+        descriptions = ''
         try:
             for playlist in reversed(playlists['items']):
                 playlist_id = playlist['id']
                 playlist_name = playlist['name']
                 if self.playlist_name in playlist_name:
                     results = self.spotipy.user_playlist(self.username, playlist_id)
-            return results['description']
+                    descriptions = descriptions + html.unescape(results['description'])
         except Exception:
             print("[!] Cannot retrieve data: {}".format(Exception))
             sys.exit(0)
+        return descriptions
 
     def populate_playlist(self, payload):
-        """Take the payload and add it to a new playlist as details."""
+        """Take the payload and add it to a new playlist as details.
+        Spotify has a limit of 300 bytes for the description field, we will create
+        additional playlists as necessary."""
+
         def get_top_songs_for_artist(artist="Tiesto", song_count=5):
             song_ids = []
             artist_results = self.spotipy.search(q='artist:' + artist, type='artist', limit=1)
@@ -101,7 +108,13 @@ class Spot(object):
                 print("[!] Cannot add random tracks: {}".format(Exception))
                 sys.exit(0)
 
-        playlist = self.spotipy.user_playlist_create(self.username,
-            self.playlist_name, False, payload)
-        add_tracks(playlist['id'], get_top_songs_for_artist())
-        print("[*] Data encoded and sent")
+        if len(payload) > 300:   # playlist description size limit by Spotify: 300 bytes
+            chunk_size = 300
+            for i in range(0, len(payload), chunk_size):
+                chunk = payload[i:i+chunk_size] 
+                print(chunk)
+                playlist = self.spotipy.user_playlist_create(self.username,
+                    self.playlist_name + str(i), False, chunk)
+                add_tracks(playlist['id'], get_top_songs_for_artist())
+                print("\t[*] Creating {}".format(self.playlist_name + str(i)))
+            print("[*] Data encoded and sent")
