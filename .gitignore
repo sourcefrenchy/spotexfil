@@ -1,3 +1,5 @@
+
 .cache-MrFrenchy
-secret.used
 *pyc
+__pycache__
+secret.used

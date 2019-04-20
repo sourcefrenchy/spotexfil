@@ -9,16 +9,11 @@ Todo:
 
 """
 
-import inspect
-import math
 import os
-import random
-import sys
-import time
-import pprint
 import spotipy  # pylint: disable=E0401
 import spotipy.util as util
-from string import ascii_lowercase
+import sys
+
 
 __author__ = '@sourcefrenchy'
 __copyright__ = 'none'
@@ -31,7 +26,7 @@ class Spot(object):
         """Constructor. Establishes a Spotify session."""
         self.playlist_name = 'inpayloadwetrust'
         self.scope = 'user-library-read user-library-modify playlist-modify-private\
-        playlist-read-private' # playlist-modify-public playlist-read-collaborative'
+        playlist-read-private'  # playlist-modify-public playlist-read-collaborative'
         if self.check_environment():
             try:
                 token = util.prompt_for_user_token(
@@ -39,10 +34,9 @@ class Spot(object):
                     self.redirect_uri
                     )
                 self.spotipy = spotipy.Spotify(auth=token)
-            except:
-                print("[!] Cannot get Spotify API token.")
+            except Exception:
+                print("[!] Cannot get Spotify API token: {}".format(Exception))
                 sys.exit(0)
-
 
     def check_environment(self):
         """Checks if SPOTIFY_* vars are loaded"""
@@ -52,11 +46,11 @@ class Spot(object):
             self.client_id = os.environ["SPOTIFY_CLIENT_ID"]
             self.client_secret = os.environ["SPOTIFY_CLIENT_SECRET"]
             return True
-        except:
-            print("Wrong/Missing SPOTIFY_CLIENT_ID, SPOTIFY_CLIENT_SECRET env vars")
+        except Exception:
+            print("Wrong/Missing SPOTIFY_CLIENT_ID, SPOTIFY_CLIENT_SECRET {}".format(Exception))
             sys.exit(0)
 
-    def unfollow_playlist(self):
+    def clear_data(self):
         """Deletes all playlists."""
         playlists = self.spotipy.user_playlists(self.username)
         for playlist in playlists['items']:
@@ -64,35 +58,35 @@ class Spot(object):
             playlist_name = playlist['name']
             if self.playlist_name in playlist_name:
                 self.spotipy.user_playlist_unfollow(self.username, playlist_id)
-        print("[*] Data removed")
+        print("[*] Data cleared")
 
     def retrieve_playlist(self):
-            """Returns details from a playlist."""
-            playlists = self.spotipy.user_playlists(self.username)
-            count = 0
-            try:
-                for playlist in reversed(playlists['items']):
-                    playlist_id = playlist['id']
-                    playlist_name = playlist['name']
-                    if self.playlist_name in playlist_name:
-                        #print("forloop id={}".format(playlist_id))
-                        results = self.spotipy.user_playlist(self.username, playlist_id)
-                return results['description']
-            except:
-                print("[!] Cannot retrieve data")
-                sys.exit(0)
-            
+        """Returns details from a playlist."""
+        playlists = self.spotipy.user_playlists(self.username)
+        try:
+            for playlist in reversed(playlists['items']):
+                playlist_id = playlist['id']
+                playlist_name = playlist['name']
+                if self.playlist_name in playlist_name:
+                    results = self.spotipy.user_playlist(self.username, playlist_id)
+            return results['description']
+        except Exception:
+            print("[!] Cannot retrieve data: {}".format(Exception))
+            sys.exit(0)
+
     def populate_playlist(self, payload):
-        """Take the payload and add it to a new playlist as details."""   
+        """Take the payload and add it to a new playlist as details."""
         def get_top_songs_for_artist(artist="Tiesto", song_count=5):
             song_ids = []
             artist_results = self.spotipy.search(q='artist:' + artist, type='artist', limit=1)
-            
+
             if artist_results['artists']['total']:
                 artist_id = artist_results['artists']['items'][0]['id']
                 artist_top_tracks = self.spotipy.artist_top_tracks(artist_id)
                 artist_top_tracks_length = len(artist_top_tracks['tracks'])
-                for x in range(0, artist_top_tracks_length if song_count > artist_top_tracks_length else song_count ):
+                for x in range(0, artist_top_tracks_length
+                    if song_count > artist_top_tracks_length
+                        else song_count):
                     song_ids.append(artist_top_tracks['tracks'][x]['id'])
             else:
                 print('[!] Artist {} not found - '.format(artist))
@@ -103,11 +97,11 @@ class Spot(object):
             """Add the tracks to a spotify playlist."""
             try:
                 self.spotipy.user_playlist_add_tracks(self.username, playlist_id, tracks)
-            except spotipy.SpotifyException as e:
-                print("[!] Cannot add random tracks")
+            except spotipy.SpotifyException as Exception:
+                print("[!] Cannot add random tracks: {}".format(Exception))
                 sys.exit(0)
 
-        playlist = self.spotipy.user_playlist_create(self.username, self.playlist_name,\
-            False, payload)
+        playlist = self.spotipy.user_playlist_create(self.username,
+            self.playlist_name, False, payload)
         add_tracks(playlist['id'], get_top_songs_for_artist())
         print("[*] Data encoded and sent")
