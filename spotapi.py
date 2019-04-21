@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """spotapi.py - Class to interact with Spotify API
 
 Written by: Jean-Michel Amblat (@Sourcefrenchy)
@@ -60,22 +59,30 @@ class Spot(object):
                 self.spotipy.user_playlist_unfollow(self.username, playlist_id)
         print("[*] Data cleared")
 
-    def retrieve_playlist(self):
-        """Returns details from a playlist."""
-        playlists = self.spotipy.user_playlists(self.username)
+    def retrieve_playlists(self):
+        """Returns details from playists.
+        Concatenate all to recompose the payload"""
+        descriptions = ''
         try:
+            playlists = self.spotipy.user_playlists(self.username)
             for playlist in reversed(playlists['items']):
                 playlist_id = playlist['id']
                 playlist_name = playlist['name']
                 if self.playlist_name in playlist_name:
-                    results = self.spotipy.user_playlist(self.username, playlist_id)
-            return results['description']
+                    try:
+                        results = self.spotipy.user_playlist(self.username, playlist_id)
+                        descriptions = descriptions + results['description']
+                    except Exception:
+                        print("[!] cannot get results from {}".format(playlist_id))
+                        sys.exit(0)
         except Exception:
             print("[!] Cannot retrieve data: {}".format(Exception))
             sys.exit(0)
+        return descriptions
 
-    def populate_playlist(self, payload):
+    def generate_playlists(self, payload):
         """Take the payload and add it to a new playlist as details."""
+
         def get_top_songs_for_artist(artist="Tiesto", song_count=5):
             song_ids = []
             artist_results = self.spotipy.search(q='artist:' + artist, type='artist', limit=1)
@@ -101,7 +108,17 @@ class Spot(object):
                 print("[!] Cannot add random tracks: {}".format(Exception))
                 sys.exit(0)
 
-        playlist = self.spotipy.user_playlist_create(self.username,
-            self.playlist_name, False, payload)
-        add_tracks(playlist['id'], get_top_songs_for_artist())
-        print("[*] Data encoded and sent")
+        if len(payload) > 15000: 
+                print("[!] encrypted payload size: {}. This is larger than 15K: ~{} playlists would have been generated. Aborting.".format(len(payload), len(payload)/300))
+                sys.exit(0)
+
+        if len(payload) > 300:   # playlist description size limit by Spotify: 300 bytes
+            chunk_size = 300
+            for i in range(0, len(payload), chunk_size):
+                chunk = payload[i:i+chunk_size] 
+                print(chunk)
+                playlist = self.spotipy.user_playlist_create(self.username,
+                    self.playlist_name + str(i), False, chunk)
+                add_tracks(playlist['id'], get_top_songs_for_artist())
+                print("\t[*] Creating {}".format(self.playlist_name + str(i)))
+            print("[*] Data encoded and sent")
