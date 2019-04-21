@@ -21,8 +21,9 @@ b5118c7d5947d2f1a467069e3f2796b3859015741622226f58609dcee056954b42520dfeb8d09c12
 ```
 
 Receiving from a far:
-```
+
 $ ./spotexfil_server.py -r
+```
 #
 # macOS Notice
 #
