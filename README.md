@@ -4,6 +4,17 @@ A simple attempt to exfiltrate data using spotify API, 300 bytes at a time.
 We can read a mini file (payload) and encode it inside a playlist description field via Spotify API.
 Really MVP/prototype, not meant for large files.
 
+# Pre-requisite
+You need to register the app with Spotiy at https://developer.spotify.com/dashboard/
+
+Then, after using the first time, the following environment variables should be set such as:
+```
+SPOTIFY_USERNAME=YourSpotifyUsername
+SPOTIFY_CLIENT_SECRET=0de477a0733545a1a40e2e35d7b9d897
+SPOTIFY_CLIENT_ID=3a292c314830b8611963ac4fb2f29da1b
+SPOTIFY_REDIRECTURI=http://localhost/callback
+```
+
 # Usage
 
 Using /etc/resolv.conf as payload:
