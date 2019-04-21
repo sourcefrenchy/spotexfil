@@ -1,12 +1,9 @@
 #!/usr/bin/env python3
 """SpotExfil - A data exfiltration tool using Spotify playlists.
 
-Written by: Jean-Michel Amblat (@Sourcefrenchy)
-Status:     PROTOTYPE/UGLY ALPHA.
-
 This tool is a quick and dirty way to save/retrieve a payload
 using Spotify API and playlists. 1 playlist every 300 bytes as per
-the limitation in the description field.
+the limitation of the description field.
 
 Pre-requisites:
 * A valid Spotify API setup, will need:
@@ -14,10 +11,6 @@ Pre-requisites:
             self.redirect_uri = os.environ["SPOTIFY_REDIRECTURI"]
             self.client_id = os.environ["SPOTIFY_CLIENT_ID"]
             self.client_secret = os.environ["SPOTIFY_CLIENT_SECRET"]
-
-Todo:
-    * Peer-review of code by a real Python dev to simplify/optimize!
-
 """
 import encoding
 import optparse
@@ -33,8 +26,8 @@ __status__ = 'PROTOTYPE'
 def set_options():
     """Define options for the program."""
     parser = optparse.OptionParser()
-    parser.add_option("-r", "--receive", action="store_true",
-            help="Receive a file")
+    parser.add_option(
+        "-r", "--receive", action="store_true", help="Receive a file")
     (options, _) = parser.parse_args()
     if options.receive is False:
         print(parser.parse_args(['--help']))
