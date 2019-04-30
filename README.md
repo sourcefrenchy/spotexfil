@@ -55,6 +55,7 @@ nameserver 172.16.0.1
 ```
 
 # TODO
+* Working on Empire C2C module
 * move from XXTEA crappy easy crypto to asymmetric (working in separate branch)
 * peer-review from a real Python developper would help :P
 * build chat system, adding a realtime listener component into spotexfil_server.py
