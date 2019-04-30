@@ -1,4 +1,4 @@
-# spotexfil (status: MVP)
+# spotexfil (status: prototype)
 A simple attempt to exfiltrate data using spotify API, 300 bytes at a time.
 
 We can read a mini file (payload) and encode it inside a playlist description field via Spotify API.
