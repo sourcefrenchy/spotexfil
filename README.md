@@ -4,6 +4,8 @@ A simple attempt to exfiltrate data using spotify API, 300 bytes at a time.
 We can read a mini file (payload) and encode it inside a playlist description field via Spotify API.
 Really MVP/prototype, not meant for large files.
 
+More info at https://medium.com/@jeanmichel.amblat/exfiltration-series-spotexfil-9aee76382b74
+
 # Pre-requisite
 You need to register the app with Spotiy at https://developer.spotify.com/dashboard/
 
