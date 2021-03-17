@@ -1,3 +1,5 @@
+[![CodeQL](https://github.com/sourcefrenchy/spotexfil/actions/workflows/codeql-analysis.yml/badge.svg)](https://github.com/sourcefrenchy/spotexfil/actions/workflows/codeql-analysis.yml)
+
 # spotexfil (status: prototype)
 A simple attempt to exfiltrate data using spotify API, 300 bytes at a time.
 
