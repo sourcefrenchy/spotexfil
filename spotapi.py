@@ -1,10 +1,10 @@
 """spotapi.py - Class to interact with Spotify API"""
 
 import os
-import spotipy  # pylint: disable=E0401
-import spotipy.util as util
 import sys
 
+import spotipy  # pylint: disable=E0401
+import spotipy.util as util
 
 __author__ = '@sourcefrenchy'
 __copyright__ = 'none'
@@ -118,8 +118,14 @@ class Spot(object):
             for i in range(0, len(payload), chunk_size):
                 chunk = payload[i:i + chunk_size]
                 print(chunk)
-                playlist = self.spotipy.user_playlist_create(
-                    self.username, self.playlist_name + str(i), False, chunk)
+                # user_playlist_create(user, name, public=True, collaborative=False, description='')
+                try:
+                    playlist = self.spotipy.user_playlist_create(
+                        self.username, self.playlist_name + str(i), False, False, chunk)
+                except spotipy.SpotifyException as Exception:
+                    print("[!] Cannot user_playlist_create: {}".format(Exception))
+                    sys.exit(0)
+
                 add_tracks(playlist['id'], get_top_songs_for_artist())
                 print("\t[*] Creating {}".format(self.playlist_name + str(i)))
             print("[*] Data encoded and sent")
