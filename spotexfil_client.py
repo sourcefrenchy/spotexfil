@@ -19,7 +19,7 @@ import spotapi as spot
 
 __author__ = '@sourcefrenchy'
 __copyright__ = 'none'
-__email__ = 'jeanmichel.amblat@gmail.com'
+__email__ = 'jmamblat@icloud.com'
 __status__ = 'PROTOTYPE'
 
 

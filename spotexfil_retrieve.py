@@ -19,7 +19,7 @@ import spotapi as spot
 
 __author__ = '@sourcefrenchy'
 __copyright__ = 'none'
-__email__ = 'jeanmichel.amblat@gmail.com'
+__email__ = 'jmamblat@icloud.com'
 __status__ = 'PROTOTYPE'
 
 
@@ -44,4 +44,11 @@ if __name__ == "__main__":
         results = S.retrieve_playlists()
         decoded = C.decode_payload(results)
         if decoded:
-            print(decoded)
+            try:
+                print(decoded.decode())
+            except:
+                f = open("payload.bin", "wb")
+                fByteArray = bytearray(decoded)
+                f.write(fByteArray)
+                print("Payload saved to payload.bin")
+                
