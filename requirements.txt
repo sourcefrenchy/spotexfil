@@ -22,7 +22,7 @@ iso8601==1.0.2
 jarowinkler==1.0.2
 Jinja2==3.0.3
 loguru==0.6.0
-Mako==1.2.0
+Mako==1.2.2
 MarkupSafe==2.1.1
 multidict==6.0.2
 netaddr==0.8.0
