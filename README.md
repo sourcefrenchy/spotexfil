@@ -16,7 +16,7 @@ Then, after using the first time, the following environment variables should be 
 SPOTIFY_USERNAME=YourSpotifyUsername
 SPOTIFY_CLIENT_SECRET=0de477a0733545a1a40e2e35d7b9d897
 SPOTIFY_CLIENT_ID=3a292c314830b8611963ac4fb2f29da1b
-SPOTIFY_REDIRECTURI=http://localhost/callback
+SPOTIFY_REDIRECTURI=http://DOMAIN:PORT/PATH
 ```
 
 # Usage
@@ -37,7 +37,7 @@ b5118c7d5947d2f1a467069e3f2796b3859015741622226f58609dcee056954b42520dfeb8d09c12
 
 Receiving from a far:
 
-$ ./spotexfil_server.py -r
+$ ./spotexfil_retrieve.py -r
 ```
 #
 # macOS Notice
