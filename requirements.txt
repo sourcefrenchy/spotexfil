@@ -1,4 +1,4 @@
-aiohttp==3.12.14
+aiohttp==3.13.3
 aiohttp-rpc==1.0.0
 aiosignal==1.2.0
 alembic==1.7.7
