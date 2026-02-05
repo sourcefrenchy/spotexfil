@@ -33,7 +33,7 @@ Pillow
 platformdirs==2.5.2
 pluggy==1.0.0
 prompt-toolkit==3.0.29
-protobuf==4.25.8
+protobuf==5.29.6
 pycparser==2.21
 pyparsing==3.0.9
 PyQt3D==5.15.5
