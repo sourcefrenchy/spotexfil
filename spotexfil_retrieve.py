@@ -1,21 +1,20 @@
 #!/usr/bin/env python3
-"""SpotExfil - A data exfiltration tool using Spotify playlists.
+"""SpotExfil Retrieve - Retrieve exfiltrated data from Spotify playlists.
 
-This tool is a quick and dirty way to save/retrieve a payload
-using Spotify API and playlists. 1 playlist every 300 bytes as per
-the limitation of the description field.
+Reads payload chunks from playlist descriptions, decodes (and optionally
+decrypts) them back to the original file.
 
 Pre-requisites:
-* A valid Spotify API setup, will need:
-            self.username = os.environ["SPOTIFY_USERNAME"]
-            self.redirect_uri = os.environ["SPOTIFY_REDIRECTURI"]
-            self.client_id = os.environ["SPOTIFY_CLIENT_ID"]
-            self.client_secret = os.environ["SPOTIFY_CLIENT_SECRET"]
+    Environment variables:
+        SPOTIFY_USERNAME, SPOTIFY_CLIENT_ID,
+        SPOTIFY_CLIENT_SECRET, SPOTIFY_REDIRECTURI
 """
-import encoding
-import optparse
-import spotapi as spot
 
+import argparse
+import sys
+
+import encoding
+import spotapi as spot
 
 __author__ = '@sourcefrenchy'
 __copyright__ = 'none'
@@ -23,32 +22,62 @@ __email__ = 'jmamblat@icloud.com'
 __status__ = 'PROTOTYPE'
 
 
-def set_options():
-    """Define options for the program."""
-    parser = optparse.OptionParser()
-    parser.add_option(
-        "-r", "--receive", action="store_true", help="Receive a file")
-    (options, _) = parser.parse_args()
-    if options.receive is False:
-        print(parser.parse_args(['--help']))
-    else:
-        return options
+def parse_args():
+    """Parse command-line arguments.
+
+    Returns:
+        argparse.Namespace with 'receive', optional 'key' and 'output'.
+    """
+    parser = argparse.ArgumentParser(
+        description='SpotExfil: retrieve data from Spotify playlists'
+    )
+    parser.add_argument(
+        '-r', '--receive', action='store_true', required=True,
+        help='Retrieve and decode the payload'
+    )
+    parser.add_argument(
+        '-k', '--key', default=None,
+        help='Decryption passphrase (must match encryption key)'
+    )
+    parser.add_argument(
+        '-o', '--output', default=None,
+        help='Output file path (default: print to stdout or payload.bin)'
+    )
+    return parser.parse_args()
+
+
+def main():
+    """Main entry point for the retrieval client."""
+    args = parse_args()
+
+    spotify = spot.Spot()
+    cipher = encoding.Subcipher(spotify, encryption_key=args.key)
+
+    results = spotify.retrieve_playlists()
+    decoded = cipher.decode_payload(results)
+
+    if not decoded:
+        print("[!] No data decoded")
+        sys.exit(1)
+
+    output_path = args.output
+
+    try:
+        # Try to decode as text
+        text = decoded.decode('utf-8')
+        if output_path:
+            with open(output_path, 'w') as f:
+                f.write(text)
+            print(f"[*] Text payload saved to {output_path}")
+        else:
+            print(text)
+    except UnicodeDecodeError:
+        # Binary payload
+        output_path = output_path or "payload.bin"
+        with open(output_path, 'wb') as f:
+            f.write(decoded)
+        print(f"[*] Binary payload saved to {output_path}")
 
 
 if __name__ == "__main__":
-    options = set_options()
-    S = spot.Spot()
-    C = encoding.Subcipher(S)
-
-    if options.receive:
-        results = S.retrieve_playlists()
-        decoded = C.decode_payload(results)
-        if decoded:
-            try:
-                print(decoded.decode())
-            except:
-                f = open("payload.bin", "wb")
-                fByteArray = bytearray(decoded)
-                f.write(fByteArray)
-                print("Payload saved to payload.bin")
-                
+    main()
