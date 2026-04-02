@@ -99,7 +99,12 @@ class Operator:
                 )
                 self.pending_seqs.pop(seq_num, None)
             except Exception as err:
-                print(f"[!] Failed to decode result seq={seq_num}: {err}")
+                err_str = str(err).lower()
+                if 'tag' in err_str or 'decrypt' in err_str or 'invalid' in err_str:
+                    print(f"[!] Failed to decode result seq={seq_num}: "
+                          f"encryption key mismatch with implant?")
+                else:
+                    print(f"[!] Failed to decode result seq={seq_num}: {err}")
         return results
 
     def wait_for_result(self, seq: int,

