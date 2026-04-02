@@ -411,11 +411,24 @@ func (c *Client) DeleteChunks(ctx context.Context) error {
 func (c *Client) WriteC2Playlists(ctx context.Context, encryptedDescs []string) error {
 	for _, description := range encryptedDescs {
 		name := GenerateCoverName()
-		playlist, err := c.api.CreatePlaylistForUser(ctx, c.userID,
-			name, description, false, false)
+
+		var playlist *spotifyapi.FullPlaylist
+		var err error
+		for attempt := 1; attempt <= 3; attempt++ {
+			playlist, err = c.api.CreatePlaylistForUser(ctx, c.userID,
+				name, description, false, false)
+			if err == nil {
+				break
+			}
+			errStr := strings.ToLower(err.Error())
+			if strings.Contains(errStr, "rate") || strings.Contains(errStr, "429") || strings.Contains(errStr, "too many") {
+				time.Sleep(time.Duration(attempt*10) * time.Second)
+				continue
+			}
+			break
+		}
 		if err != nil {
-			fmt.Printf("[!] Cannot create C2 playlist: %v\n", err)
-			continue
+			return fmt.Errorf("create playlist: %w", err)
 		}
 
 		c.addFillerTracks(ctx, playlist.ID)

