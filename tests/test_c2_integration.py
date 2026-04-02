@@ -75,12 +75,12 @@ class TestC2Roundtrip:
             implant._poll_and_execute()
 
         cmd_playlists = operator.spotify.read_c2_playlists(
-            proto.CHANNEL_CMD
+            proto.CHANNEL_CMD, TEST_KEY
         )
         assert len(cmd_playlists) == 0
 
         res_playlists = operator.spotify.read_c2_playlists(
-            proto.CHANNEL_RES
+            proto.CHANNEL_RES, TEST_KEY
         )
         assert len(res_playlists) == 1
 
@@ -186,10 +186,14 @@ class TestChannelIsolation:
         """Command playlists don't appear in result channel."""
         operator.send_command("sysinfo")
 
-        res = spot_c2.read_c2_playlists(proto.CHANNEL_RES)
+        res = spot_c2.read_c2_playlists(
+            proto.CHANNEL_RES, TEST_KEY
+        )
         assert len(res) == 0
 
-        cmd = spot_c2.read_c2_playlists(proto.CHANNEL_CMD)
+        cmd = spot_c2.read_c2_playlists(
+            proto.CHANNEL_CMD, TEST_KEY
+        )
         assert len(cmd) == 1
 
     def test_res_not_in_cmd_channel(
@@ -198,10 +202,14 @@ class TestChannelIsolation:
         operator.send_command("sysinfo")
         implant._poll_and_execute()
 
-        cmd = spot_c2.read_c2_playlists(proto.CHANNEL_CMD)
+        cmd = spot_c2.read_c2_playlists(
+            proto.CHANNEL_CMD, TEST_KEY
+        )
         assert len(cmd) == 0
 
-        res = spot_c2.read_c2_playlists(proto.CHANNEL_RES)
+        res = spot_c2.read_c2_playlists(
+            proto.CHANNEL_RES, TEST_KEY
+        )
         assert len(res) == 1
 
 
@@ -231,12 +239,16 @@ class TestCleanup:
         """Implant deletes command playlists after execution."""
         operator.send_command("sysinfo")
 
-        cmd_before = spot_c2.read_c2_playlists(proto.CHANNEL_CMD)
+        cmd_before = spot_c2.read_c2_playlists(
+            proto.CHANNEL_CMD, TEST_KEY
+        )
         assert len(cmd_before) == 1
 
         implant._poll_and_execute()
 
-        cmd_after = spot_c2.read_c2_playlists(proto.CHANNEL_CMD)
+        cmd_after = spot_c2.read_c2_playlists(
+            proto.CHANNEL_CMD, TEST_KEY
+        )
         assert len(cmd_after) == 0
 
 
@@ -274,7 +286,9 @@ class TestC2Encryption:
         op.send_command("sysinfo")
         imp._poll_and_execute()
 
-        res = spot_c2.read_c2_playlists(proto.CHANNEL_RES)
+        res = spot_c2.read_c2_playlists(
+            proto.CHANNEL_RES, TEST_KEY
+        )
         assert len(res) == 0
 
     def test_correct_key_works(self, operator, implant):

