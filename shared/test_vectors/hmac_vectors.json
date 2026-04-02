@@ -1,0 +1,16 @@
+[
+  {
+    "key": "test-c2-key",
+    "label": "spotexfil-c2-tag",
+    "full_hex": "f593aac363efe9d66e88ede3f133da4a45cc330b3a3a64e874303843ea8c4f84",
+    "truncated": "f593aac363ef",
+    "truncate_len": 12
+  },
+  {
+    "key": "test-c2-key",
+    "label": "spotexfil-c2-meta-key",
+    "full_hex": "981b83de31cf8026d69d64b6bb0e6871d39e6e882ee03bb5a68e2d8bc9b339fc",
+    "truncated": "981b83de31cf8026d69d64b6bb0e6871d39e6e882ee03bb5a68e2d8bc9b339fc",
+    "truncate_len": 64
+  }
+]

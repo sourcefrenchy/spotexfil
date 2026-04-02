@@ -1,0 +1,17 @@
+[
+  {
+    "password": "test-password",
+    "salt": "00000000000000000000000000000000",
+    "key": "45e9d8d5df58a44f91a8f68249f65856e69589e9a0bc74db7da4631992af3b5a"
+  },
+  {
+    "password": "hello-world",
+    "salt": "ffffffffffffffffffffffffffffffff",
+    "key": "2c555c108a69e9a5d08fab365f8fa7bedf496967eb8fa5e31d551e579908e4da"
+  },
+  {
+    "password": "spotexfil-key",
+    "salt": "deadbeefdeadbeefdeadbeefdeadbeef",
+    "key": "52303db45e6ac1712655f4df59f6700852ea1e061ef05620fce5d5046907f05d"
+  }
+]

@@ -1,0 +1,30 @@
+modules:
+  shell:
+    description: "Execute a shell command on the target"
+    args:
+      cmd:
+        type: string
+        required: true
+        description: "Shell command to execute"
+    timeout: 30
+    max_result_size: 500000
+
+  exfil:
+    description: "Exfiltrate a file from the target filesystem"
+    args:
+      path:
+        type: string
+        required: true
+        description: "Absolute or relative file path to read"
+    max_result_size: 500000
+
+  sysinfo:
+    description: "Gather system information from the target"
+    args: {}
+    fields:
+      - os
+      - hostname
+      - username
+      - ips
+      - pid
+      - cwd

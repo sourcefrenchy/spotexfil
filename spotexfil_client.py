@@ -10,8 +10,11 @@ Credentials can be provided via environment variables or
 
 import argparse
 
-import encoding
-import spotapi as spot
+import sys
+import os
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'python'))
+from spotexfil import crypto as encoding  # noqa: E402
+from spotexfil import transport as spot  # noqa: E402
 
 __author__ = '@sourcefrenchy'
 __copyright__ = 'none'

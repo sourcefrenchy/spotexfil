@@ -1,0 +1,54 @@
+{
+  "version": 1,
+  "crypto": {
+    "key_size": 32,
+    "nonce_size": 12,
+    "salt_size": 16,
+    "kdf_iterations": 480000,
+    "kdf_algorithm": "PBKDF2-SHA256",
+    "cipher": "AES-256-GCM",
+    "blake2b_digest_size": 20,
+    "blake2b_hex_len": 40
+  },
+  "compression": {
+    "flag_compressed": 1,
+    "flag_raw": 0,
+    "algorithm": "gzip",
+    "level": 9
+  },
+  "transport": {
+    "chunk_size": 512,
+    "max_payload_size": 1023999,
+    "marker_sep": "\u200b",
+    "cover_names": [
+      "Chill Vibes", "Morning Coffee", "Workout Mix", "Road Trip",
+      "Late Night", "Study Session", "Party Hits", "Throwback",
+      "Relaxation", "Good Mood", "Focus Flow", "Sunday Morning",
+      "Summer Jams", "Indie Finds", "Deep Cuts", "Evening Wind Down",
+      "Energy Boost", "Acoustic Covers", "Rainy Day", "Dance Floor"
+    ],
+    "filler_artists": [
+      "Tiesto", "Deadmau5", "Avicii", "Calvin Harris",
+      "Martin Garrix", "Armin van Buuren", "David Guetta"
+    ]
+  },
+  "c2": {
+    "tag_len": 12,
+    "effective_chunk": 300,
+    "channel_cmd": "cmd",
+    "channel_res": "res",
+    "tag_label": "spotexfil-c2-tag",
+    "meta_key_label": "spotexfil-c2-meta-key",
+    "shell_timeout": 30,
+    "max_result_size": 500000,
+    "default_interval": 60,
+    "default_jitter": 30,
+    "wait_timeout": 300,
+    "wait_poll_interval": 10
+  },
+  "wire_format": {
+    "file_exfil": "salt(16) || nonce(12) || AES-GCM(hash_len(2BE) || blake2b_hex(40) || flag(1) || data) + tag(16) -> base64 -> json",
+    "c2_description": "hmac_tag(12hex) + base64(nonce(12) || AES-GCM(json({m:{c,i,seq}, d:chunk})) + tag(16))",
+    "c2_message": "salt(16) || nonce(12) || AES-GCM(hash_len(2BE) || blake2b_hex(40) || flag(1) || json_data) + tag(16) -> base64"
+  }
+}

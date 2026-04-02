@@ -10,3 +10,5 @@ auth_test.py
 dist/
 build/
 *.spec
+go/go.sum
+.pytest_cache/

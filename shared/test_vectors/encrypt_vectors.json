@@ -1,0 +1,18 @@
+[
+  {
+    "password": "test-key",
+    "salt": "00000000000000000000000000000000",
+    "nonce": "000000000000000000000000",
+    "plaintext": "Hello from Python!",
+    "ciphertext": "ZlyBnZ4sqU3lAuaj5fDeZo+lGC+vX4bEwMhAJ8sq5rrUHA==",
+    "key": "d8e78148ddc142ac6848c0ef94d6317438adfe0d1bb0f733c5532a1ffa83df07"
+  },
+  {
+    "password": "demo-key",
+    "salt": "abababababababababababababababab",
+    "nonce": "cdcdcdcdcdcdefefefefefef",
+    "plaintext": "Binary test",
+    "ciphertext": "5MnhzU3X9PmbfCcEEdUXKVFnHPkB/g8PTmxj",
+    "key": "874e71b82ad5c0eb49e77bcd3899df82ee740f4aed524a0f270412537e85d0da"
+  }
+]
