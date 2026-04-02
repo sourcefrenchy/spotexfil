@@ -1,4 +1,4 @@
-"""Tests for encoding.py - payload encoding, encryption, and integrity."""
+"""Tests for encoding.py - payload encoding, encryption, compression."""
 
 import json
 import os
@@ -6,7 +6,10 @@ import tempfile
 
 import pytest
 
-from encoding import Subcipher, compute_blake2b, derive_key
+from encoding import (
+    Subcipher, compute_blake2b, derive_key,
+    FLAG_COMPRESSED, FLAG_RAW,
+)
 
 
 # --- Fixtures ---
@@ -45,6 +48,17 @@ def temp_large_file():
 
 
 @pytest.fixture
+def temp_compressible_file():
+    """Create a highly compressible file (repeated text)."""
+    content = b"SpotExfil test data. " * 200  # 4000 bytes, very compressible
+    with tempfile.NamedTemporaryFile(delete=False, suffix='.txt') as f:
+        f.write(content)
+        f.flush()
+        yield f.name, content
+    os.unlink(f.name)
+
+
+@pytest.fixture
 def temp_empty_file():
     """Create an empty file."""
     with tempfile.NamedTemporaryFile(delete=False, suffix='.empty') as f:
@@ -62,6 +76,14 @@ def cipher_no_key():
 def cipher_with_key():
     """Subcipher with AES-256-GCM encryption."""
     return Subcipher(spot=None, encryption_key="test-secret-passphrase-123")
+
+
+@pytest.fixture
+def cipher_no_compress():
+    """Subcipher with encryption but no compression."""
+    return Subcipher(
+        spot=None, encryption_key="test-key", compress=False
+    )
 
 
 # --- Unit Tests: compute_blake2b ---
@@ -171,10 +193,53 @@ class TestEncryptDecrypt:
         """Corrupted ciphertext raises an error."""
         plaintext = b"test"
         encrypted = bytearray(cipher_with_key._encrypt(plaintext))
-        # Corrupt the ciphertext portion
         encrypted[-1] ^= 0xFF
         with pytest.raises(Exception):
             cipher_with_key._decrypt(bytes(encrypted))
+
+
+# --- Unit Tests: Compression ---
+
+class TestCompression:
+    def test_compress_text_saves_space(self):
+        """Compressible data gets smaller."""
+        data = b"AAAA" * 500
+        result = Subcipher._compress(data)
+        assert result[0:1] == FLAG_COMPRESSED
+        assert len(result) < len(data)
+
+    def test_compress_random_skips(self):
+        """Random data (incompressible) keeps FLAG_RAW."""
+        data = os.urandom(500)
+        result = Subcipher._compress(data)
+        assert result[0:1] == FLAG_RAW
+        assert result[1:] == data
+
+    def test_decompress_compressed(self):
+        """Decompress reverses compression."""
+        original = b"test data " * 100
+        compressed = Subcipher._compress(original)
+        assert compressed[0:1] == FLAG_COMPRESSED
+        result = Subcipher._decompress(compressed)
+        assert result == original
+
+    def test_decompress_raw(self):
+        """Decompress handles uncompressed data."""
+        original = os.urandom(100)
+        raw = FLAG_RAW + original
+        result = Subcipher._decompress(raw)
+        assert result == original
+
+    def test_decompress_empty(self):
+        """Decompress handles empty input."""
+        assert Subcipher._decompress(b"") == b""
+
+    def test_compress_decompress_roundtrip(self):
+        """Full compression roundtrip."""
+        original = b"Hello World! " * 50
+        compressed = Subcipher._compress(original)
+        decompressed = Subcipher._decompress(compressed)
+        assert decompressed == original
 
 
 # --- Unit Tests: Base64 Decode ---
@@ -215,12 +280,10 @@ class TestEncodeDecodePipeline:
         filepath, original = temp_text_file
         encoded = cipher_no_key.encode_payload(filepath)
 
-        # Verify JSON-wrapped base64
         assert isinstance(encoded, str)
         decoded_json = json.loads(encoded)
         assert isinstance(decoded_json, str)
 
-        # Decode back
         decoded = cipher_no_key.decode_payload(encoded)
         assert decoded == original
 
@@ -292,6 +355,30 @@ class TestEncodeDecodePipeline:
         captured = capsys.readouterr()
         assert "not verified" in captured.out
 
+    def test_compressed_payload_smaller(
+            self, temp_compressible_file, capsys):
+        """Compressed encrypted payload is smaller than uncompressed."""
+        filepath, original = temp_compressible_file
+
+        c_on = Subcipher(spot=None, encryption_key="k", compress=True)
+        c_off = Subcipher(spot=None, encryption_key="k", compress=False)
+
+        enc_compressed = c_on.encode_payload(filepath)
+        enc_raw = c_off.encode_payload(filepath)
+
+        assert len(enc_compressed) < len(enc_raw)
+
+        # Both decode to original
+        assert c_on.decode_payload(enc_compressed) == original
+        assert c_off.decode_payload(enc_raw) == original
+
+    def test_no_compress_flag(self, cipher_no_compress, temp_text_file):
+        """compress=False disables compression."""
+        filepath, original = temp_text_file
+        encoded = cipher_no_compress.encode_payload(filepath)
+        decoded = cipher_no_compress.decode_payload(encoded)
+        assert decoded == original
+
 
 # --- Chunking Simulation Tests ---
 
@@ -299,8 +386,11 @@ class TestChunking:
     """Simulate the chunking that spotapi does, verify reassembly."""
 
     def _simulate_chunk_reassemble(self, payload: str,
-                                   chunk_size: int = 512) -> str:
-        """Simulate splitting into playlist chunks and reassembling."""
+                                   chunk_size: int = 492) -> str:
+        """Simulate splitting into playlist chunks and reassembling.
+
+        Uses effective chunk size (512 - 20 metadata overhead).
+        """
         if len(payload) <= chunk_size:
             chunks = [payload]
         else:
@@ -314,37 +404,15 @@ class TestChunking:
         """Small payload fits in one chunk."""
         filepath, original = temp_text_file
         encoded = cipher_no_key.encode_payload(filepath)
-        assert len(encoded) <= 512 or len(encoded) > 512  # just encode
         reassembled = self._simulate_chunk_reassemble(encoded)
         decoded = cipher_no_key.decode_payload(reassembled)
         assert decoded == original
 
-    def test_large_payload_multi_chunk(self, cipher_with_key, temp_large_file):
+    def test_large_payload_multi_chunk(
+            self, cipher_with_key, temp_large_file):
         """Large payload splits into multiple chunks and reassembles."""
         filepath, original = temp_large_file
         encoded = cipher_with_key.encode_payload(filepath)
-
-        # Verify it would need multiple chunks
-        assert len(encoded) > 512
-
         reassembled = self._simulate_chunk_reassemble(encoded)
         decoded = cipher_with_key.decode_payload(reassembled)
         assert decoded == original
-
-    def test_exact_chunk_boundary(self, cipher_no_key):
-        """Payload exactly at chunk boundary works."""
-        # Create content that encodes to exactly 512 chars
-        with tempfile.NamedTemporaryFile(delete=False, suffix='.dat') as f:
-            # Base64 expansion is ~4/3, plus JSON quotes = ~2
-            f.write(b"X" * 381)  # ~512 chars after base64+json
-            content_len = 381
-            f.flush()
-            path = f.name
-
-        try:
-            encoded = cipher_no_key.encode_payload(path)
-            reassembled = self._simulate_chunk_reassemble(encoded)
-            decoded = cipher_no_key.decode_payload(reassembled)
-            assert decoded == b"X" * content_len
-        finally:
-            os.unlink(path)

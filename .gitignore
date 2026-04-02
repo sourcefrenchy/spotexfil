@@ -6,3 +6,7 @@ payload.bin
 auth_test.py
 .env
 *.key
+.spotexfil.conf
+dist/
+build/
+*.spec

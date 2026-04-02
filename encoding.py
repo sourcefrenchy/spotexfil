@@ -1,15 +1,14 @@
 """encoding.py - Payload encoding, encryption, and integrity verification.
 
 Handles the full pipeline:
-    File -> BLAKE2b hash -> AES-256-GCM encrypt -> Base64 encode -> JSON wrap
+    File -> gzip compress -> BLAKE2b hash -> AES-256-GCM encrypt
+         -> Base64 encode -> JSON wrap
 
 Decoding reverses the pipeline and verifies the integrity hash.
-
-Todo:
-    * Leverage compression for large payloads (gzip for binaries).
 """
 
 import base64
+import gzip
 import html
 import json
 import os
@@ -31,6 +30,10 @@ KEY_SIZE = 32       # 256-bit key
 NONCE_SIZE = 12     # 96-bit nonce (recommended for GCM)
 SALT_SIZE = 16      # 128-bit salt for PBKDF2
 KDF_ITERATIONS = 480_000  # OWASP recommendation for PBKDF2-SHA256
+
+# Compression flag bytes prepended to payload
+FLAG_COMPRESSED = b'\x01'
+FLAG_RAW = b'\x00'
 
 
 def derive_key(password: str, salt: bytes) -> bytes:
@@ -73,18 +76,23 @@ class Subcipher:
     Supports two modes:
         - Encrypted (default): AES-256-GCM + Base64 + JSON
         - Legacy plaintext: Base64 + JSON only (for backward compat)
+
+    Compression (gzip) is applied by default before encryption.
     """
 
-    def __init__(self, spot, encryption_key: str = None):
+    def __init__(self, spot, encryption_key: str = None,
+                 compress: bool = True):
         """Initialize Subcipher.
 
         Args:
             spot: Spot instance for Spotify API access.
             encryption_key: Optional passphrase for AES-256-GCM encryption.
                 If None, payloads are Base64-encoded only (legacy mode).
+            compress: Whether to gzip-compress payloads (default True).
         """
         self.spotipy = spot
         self.encryption_key = encryption_key
+        self.compress = compress
 
     def _encrypt(self, plaintext: bytes) -> bytes:
         """Encrypt plaintext using AES-256-GCM.
@@ -129,10 +137,41 @@ class Subcipher:
         aesgcm = AESGCM(key)
         return aesgcm.decrypt(nonce, ciphertext, None)
 
+    @staticmethod
+    def _compress(data: bytes) -> bytes:
+        """Gzip-compress data with flag prefix.
+
+        Returns:
+            FLAG_COMPRESSED + gzip'd bytes, or FLAG_RAW + original
+            if compression doesn't help.
+        """
+        compressed = gzip.compress(data, compresslevel=9)
+        if len(compressed) < len(data):
+            return FLAG_COMPRESSED + compressed
+        return FLAG_RAW + data
+
+    @staticmethod
+    def _decompress(data: bytes) -> bytes:
+        """Decompress data based on flag prefix.
+
+        Args:
+            data: Flag byte + payload.
+
+        Returns:
+            Decompressed (or raw) bytes.
+        """
+        if not data:
+            return data
+        flag = data[:1]
+        payload = data[1:]
+        if flag == FLAG_COMPRESSED:
+            return gzip.decompress(payload)
+        return payload
+
     def encode_payload(self, input_file: str) -> str:
         """Encode a file into a transmittable payload string.
 
-        Pipeline: read file -> BLAKE2b hash -> encrypt (if key) -> Base64 -> JSON
+        Pipeline: read -> compress -> BLAKE2b -> encrypt -> Base64 -> JSON
 
         Args:
             input_file: Path to the file to encode.
@@ -152,17 +191,31 @@ class Subcipher:
 
         checksum = compute_blake2b(plaintext)
         print(f"[*] checksum plaintext {checksum}")
+        print(f"[*] original size: {len(plaintext)} bytes")
+
+        # Compress
+        if self.compress:
+            data = self._compress(plaintext)
+            saved = len(plaintext) - len(data) + 1  # +1 for flag byte
+            if data[0:1] == FLAG_COMPRESSED:
+                pct = (saved / len(plaintext) * 100) if plaintext else 0
+                print(f"[*] compressed: {len(data)} bytes "
+                      f"(saved {pct:.0f}%)")
+            else:
+                print("[*] compression skipped (no benefit)")
+        else:
+            data = FLAG_RAW + plaintext
+            print("[*] compression disabled")
 
         if self.encryption_key:
             # Prepend hash for integrity verification after decryption
             hash_bytes = checksum.encode('utf-8')
-            # Format: hash_len (2 bytes) || hash || plaintext
+            # Format: hash_len (2 bytes) || hash || data
             hash_len = len(hash_bytes).to_bytes(2, 'big')
-            data_to_encrypt = hash_len + hash_bytes + plaintext
+            data_to_encrypt = hash_len + hash_bytes + data
             data = self._encrypt(data_to_encrypt)
             print("[*] payload encrypted with AES-256-GCM")
         else:
-            data = plaintext
             print("[!] WARNING: no encryption key set, payload is plaintext")
 
         b64data = base64.b64encode(data).decode('utf-8')
@@ -171,7 +224,7 @@ class Subcipher:
     def decode_payload(self, payload: str) -> bytes:
         """Decode a received payload back to original file bytes.
 
-        Pipeline: HTML unescape -> JSON load -> Base64 decode -> decrypt -> verify hash
+        Pipeline: unescape -> JSON -> Base64 -> decrypt -> verify -> decompress
 
         Args:
             payload: The raw concatenated playlist descriptions.
@@ -207,7 +260,10 @@ class Subcipher:
             # Extract and verify integrity hash
             hash_len = int.from_bytes(decrypted[:2], 'big')
             stored_hash = decrypted[2:2 + hash_len].decode('utf-8')
-            plaintext = decrypted[2 + hash_len:]
+            compressed_data = decrypted[2 + hash_len:]
+
+            # Decompress
+            plaintext = self._decompress(compressed_data)
 
             actual_hash = compute_blake2b(plaintext)
             if stored_hash != actual_hash:
@@ -219,7 +275,8 @@ class Subcipher:
                 sys.exit(1)
             print(f"[*] integrity verified: {actual_hash}")
         else:
-            plaintext = raw_bytes
+            # Legacy mode: decompress then hash
+            plaintext = self._decompress(raw_bytes)
             checksum = compute_blake2b(plaintext)
             print(f"[*] checksum payload {checksum} (not verified, no key)")
 
