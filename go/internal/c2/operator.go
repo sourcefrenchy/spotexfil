@@ -133,9 +133,24 @@ func (op *Operator) WaitForResult(seq int) (map[string]interface{}, error) {
 	return nil, fmt.Errorf("timeout waiting for seq=%d", seq)
 }
 
-// checkForCheckins silently polls for new implant check-ins.
+// checkForCheckins polls for new implant check-ins and results.
 func (op *Operator) checkForCheckins() {
-	op.PollResults()
+	results, err := op.PollResults()
+	if err != nil {
+		fmt.Printf("[!] Poll error: %v\n", err)
+		return
+	}
+	// Display any non-checkin results that came in
+	if len(results) > 0 {
+		seqs := make([]int, 0, len(results))
+		for s := range results {
+			seqs = append(seqs, s)
+		}
+		sort.Ints(seqs)
+		for _, s := range seqs {
+			displayResult(s, results[s])
+		}
+	}
 }
 
 // Interactive runs the interactive operator console.
