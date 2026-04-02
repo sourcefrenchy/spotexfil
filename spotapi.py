@@ -1,7 +1,7 @@
 """spotapi.py - Spotify API wrapper for covert channel operations.
 
 Handles authentication, playlist CRUD, and payload chunking via
-Spotify playlist descriptions (300 bytes per playlist).
+Spotify playlist descriptions (512 characters per playlist).
 """
 
 import os
@@ -18,11 +18,11 @@ __copyright__ = 'none'
 __email__ = 'jmamblat@icloud.com'
 __status__ = 'PROTOTYPE'
 
-# Playlist description size limit in bytes
-CHUNK_SIZE = 300
+# Playlist description size limit (empirically tested 2026-04, API rejects 513+)
+CHUNK_SIZE = 512
 
 # Max payload size before aborting (~2000 playlists)
-MAX_PAYLOAD_SIZE = 599_999
+MAX_PAYLOAD_SIZE = 1_023_999
 
 # Default filler artists to pick from randomly
 DEFAULT_ARTISTS = [

@@ -35,7 +35,7 @@ def temp_binary_file():
 
 @pytest.fixture
 def temp_large_file():
-    """Create a file larger than one playlist chunk (>300 bytes encoded)."""
+    """Create a file larger than one playlist chunk (>512 chars encoded)."""
     content = b"A" * 1024
     with tempfile.NamedTemporaryFile(delete=False, suffix='.dat') as f:
         f.write(content)
@@ -299,7 +299,7 @@ class TestChunking:
     """Simulate the chunking that spotapi does, verify reassembly."""
 
     def _simulate_chunk_reassemble(self, payload: str,
-                                   chunk_size: int = 300) -> str:
+                                   chunk_size: int = 512) -> str:
         """Simulate splitting into playlist chunks and reassembling."""
         if len(payload) <= chunk_size:
             chunks = [payload]
@@ -314,7 +314,7 @@ class TestChunking:
         """Small payload fits in one chunk."""
         filepath, original = temp_text_file
         encoded = cipher_no_key.encode_payload(filepath)
-        assert len(encoded) <= 300 or len(encoded) > 300  # just encode
+        assert len(encoded) <= 512 or len(encoded) > 512  # just encode
         reassembled = self._simulate_chunk_reassemble(encoded)
         decoded = cipher_no_key.decode_payload(reassembled)
         assert decoded == original
@@ -325,7 +325,7 @@ class TestChunking:
         encoded = cipher_with_key.encode_payload(filepath)
 
         # Verify it would need multiple chunks
-        assert len(encoded) > 300
+        assert len(encoded) > 512
 
         reassembled = self._simulate_chunk_reassemble(encoded)
         decoded = cipher_with_key.decode_payload(reassembled)
@@ -333,10 +333,11 @@ class TestChunking:
 
     def test_exact_chunk_boundary(self, cipher_no_key):
         """Payload exactly at chunk boundary works."""
-        # Create content that encodes to exactly 300 bytes
+        # Create content that encodes to exactly 512 chars
         with tempfile.NamedTemporaryFile(delete=False, suffix='.dat') as f:
             # Base64 expansion is ~4/3, plus JSON quotes = ~2
-            f.write(b"X" * 222)  # ~300 bytes after base64+json
+            f.write(b"X" * 381)  # ~512 chars after base64+json
+            content_len = 381
             f.flush()
             path = f.name
 
@@ -344,6 +345,6 @@ class TestChunking:
             encoded = cipher_no_key.encode_payload(path)
             reassembled = self._simulate_chunk_reassemble(encoded)
             decoded = cipher_no_key.decode_payload(reassembled)
-            assert decoded == b"X" * 222
+            assert decoded == b"X" * content_len
         finally:
             os.unlink(path)

@@ -230,33 +230,33 @@ class TestGeneratePlaylists:
 
     def test_large_payload_multiple_playlists(
             self, spot_instance, mock_spotipy):
-        """Payload > 300 bytes creates multiple playlists."""
+        """Payload > 512 chars creates multiple playlists."""
         mock_spotipy.user_playlist_create.return_value = {'id': 'new_pl'}
 
-        payload = "A" * 700  # Should create 3 playlists (300+300+100)
+        payload = "A" * 1200  # Should create 3 playlists (512+512+176)
         spot_instance.generate_playlists(payload)
 
         assert mock_spotipy.user_playlist_create.call_count == 3
 
     def test_payload_too_large_exits(self, spot_instance):
         """Payload over MAX_PAYLOAD_SIZE causes exit."""
-        payload = "X" * 600_000
+        payload = "X" * 1_024_000
         with pytest.raises(SystemExit) as exc_info:
             spot_instance.generate_playlists(payload)
         assert exc_info.value.code == 1
 
     def test_chunks_are_correct_size(self, spot_instance, mock_spotipy):
-        """Each chunk except the last is exactly 300 bytes."""
+        """Each chunk except the last is exactly 512 chars."""
         mock_spotipy.user_playlist_create.return_value = {'id': 'new_pl'}
 
-        payload = "B" * 650
+        payload = "B" * 1100
         spot_instance.generate_playlists(payload)
 
         calls = mock_spotipy.user_playlist_create.call_args_list
         descriptions = [c[1]['description'] for c in calls]
-        assert len(descriptions[0]) == 300
-        assert len(descriptions[1]) == 300
-        assert len(descriptions[2]) == 50  # remainder
+        assert len(descriptions[0]) == 512
+        assert len(descriptions[1]) == 512
+        assert len(descriptions[2]) == 76  # remainder
 
     def test_filler_tracks_added(self, spot_instance, mock_spotipy):
         """Filler tracks are added to each playlist."""

@@ -2,7 +2,7 @@
 """SpotExfil Client - Exfiltrate data via Spotify playlists.
 
 Reads a file, encodes it (optionally encrypts with AES-256-GCM),
-and stores it across Spotify playlist descriptions.
+and stores it across Spotify playlist descriptions (512 chars each).
 
 Pre-requisites:
     Environment variables:

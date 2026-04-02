@@ -2,7 +2,7 @@
 
 # SpotExfil
 
-A proof-of-concept covert channel that exfiltrates data through Spotify playlist descriptions, 300 bytes at a time.
+A proof-of-concept covert channel that exfiltrates data through Spotify playlist descriptions, 512 characters at a time.
 
 More info at [Exfiltration Series: SpotExfil](https://medium.com/@jeanmichel.amblat/exfiltration-series-spotexfil-9aee76382b74)
 
@@ -25,7 +25,7 @@ More info at [Exfiltration Series: SpotExfil](https://medium.com/@jeanmichel.amb
 ```
 
 1. **Encode**: Read file, compute BLAKE2b integrity hash, encrypt with AES-256-GCM, Base64-encode, wrap in JSON
-2. **Chunk**: Split payload into 300-byte pieces (Spotify playlist description limit)
+2. **Chunk**: Split payload into 512-character pieces (Spotify playlist description limit)
 3. **Transmit**: Create private playlists with payload chunks as descriptions, add filler tracks from random artists
 4. **Retrieve**: Fetch playlists, sort by index, reassemble, decrypt, verify integrity hash
 
@@ -146,8 +146,8 @@ spotexfil/
 
 ## Limitations
 
-- **~600KB max payload** (~2000 playlists before Spotify limits)
-- **Slow for large files** (1 API call per 300-byte chunk)
+- **~1MB max payload** (~2000 playlists before Spotify limits)
+- **Slow for large files** (1 API call per 512-character chunk)
 - **Spotify rate limits** may throttle bulk operations
 - Playlist naming pattern (`N-payloadChunk`) is detectable by network analysis
 
