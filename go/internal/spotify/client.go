@@ -412,21 +412,8 @@ func (c *Client) WriteC2Playlists(ctx context.Context, encryptedDescs []string) 
 	for _, description := range encryptedDescs {
 		name := GenerateCoverName()
 
-		var playlist *spotifyapi.FullPlaylist
-		var err error
-		for attempt := 1; attempt <= 3; attempt++ {
-			playlist, err = c.api.CreatePlaylistForUser(ctx, c.userID,
-				name, description, false, false)
-			if err == nil {
-				break
-			}
-			errStr := strings.ToLower(err.Error())
-			if strings.Contains(errStr, "rate") || strings.Contains(errStr, "429") || strings.Contains(errStr, "too many") {
-				time.Sleep(time.Duration(attempt*10) * time.Second)
-				continue
-			}
-			break
-		}
+		playlist, err := c.api.CreatePlaylistForUser(ctx, c.userID,
+			name, description, false, false)
 		if err != nil {
 			return fmt.Errorf("create playlist: %w", err)
 		}
