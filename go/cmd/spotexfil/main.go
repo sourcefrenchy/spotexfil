@@ -185,6 +185,7 @@ func c2ImplantCmd() *cobra.Command {
 
 func c2OperatorCmd() *cobra.Command {
 	var key string
+	var pollInterval int
 
 	cmd := &cobra.Command{
 		Use:   "c2-operator",
@@ -200,13 +201,14 @@ func c2OperatorCmd() *cobra.Command {
 				return err
 			}
 
-			operator := c2.NewOperator(client, key)
+			operator := c2.NewOperator(client, key, pollInterval)
 			operator.Interactive()
 			return nil
 		},
 	}
 
 	cmd.Flags().StringVarP(&key, "key", "k", "", "Encryption passphrase")
+	cmd.Flags().IntVar(&pollInterval, "poll-interval", 30, "Background poll interval in seconds (default 30)")
 	cmd.MarkFlagRequired("key")
 
 	return cmd

