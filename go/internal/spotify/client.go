@@ -64,10 +64,35 @@ func NewClient(cfg *Config, useCoverNames bool) (*Client, error) {
 		}
 	}
 
-	httpClient := auth.Client(context.Background(), token)
+	ctx := context.Background()
+	httpClient := auth.Client(ctx, token)
 	api := spotifyapi.New(httpClient)
 
-	// Save token for future use
+	// Test the token by making a simple API call
+	_, err = api.CurrentUser(ctx)
+	if err != nil {
+		errStr := strings.ToLower(err.Error())
+		if strings.Contains(errStr, "401") || strings.Contains(errStr, "expired") ||
+			strings.Contains(errStr, "unauthorized") {
+			fmt.Println("[*] Token expired, re-authenticating...")
+			token, err = runOAuthFlow(cfg, auth)
+			if err != nil {
+				return nil, fmt.Errorf("re-auth failed: %w", err)
+			}
+			httpClient = auth.Client(ctx, token)
+			api = spotifyapi.New(httpClient)
+		} else if strings.Contains(errStr, "rate") || strings.Contains(errStr, "429") ||
+			strings.Contains(errStr, "too many") {
+			fmt.Println("[!] Spotify API rate limited — token may be valid but API is throttled")
+			fmt.Println("[!] Wait a few minutes and try again")
+		} else {
+			return nil, fmt.Errorf("API test failed: %w", err)
+		}
+	} else {
+		fmt.Println("[*] API connection verified")
+	}
+
+	// Save refreshed token for future use
 	_ = saveCachedToken(cfg, token)
 
 	return &Client{
