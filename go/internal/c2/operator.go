@@ -364,13 +364,8 @@ func (op *Operator) handleCheckin(result map[string]interface{}) {
 	if p, ok := info["pid"].(float64); ok {
 		pid = int(p)
 	}
-	ts, _ := result["ts"].(float64)
-	var timestamp string
-	if ts > 0 {
-		timestamp = time.Unix(int64(ts), 0).Format("2006-01-02 15:04:05")
-	} else {
-		timestamp = time.Now().Format("2006-01-02 15:04:05")
-	}
+	// Use current time (when operator received it), not implant send time
+	timestamp := time.Now().Format("2006-01-02 15:04:05")
 
 	op.connectedClients[clientID] = ClientInfo{
 		Hostname:    hostname,

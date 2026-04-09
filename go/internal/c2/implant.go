@@ -225,8 +225,11 @@ func (imp *Implant) Run() {
 				backoff = 300
 			}
 			sleepTime = backoff
-			fmt.Printf("[*] Backoff: next poll in %s (fail #%d)\n",
-				formatDuration(sleepTime), imp.consecutiveFails)
+			// Only log first 3 failures and every 10th after
+			if imp.consecutiveFails <= 3 || imp.consecutiveFails%10 == 0 {
+				fmt.Printf("[*] Backoff: next poll in %s (fail #%d)\n",
+					formatDuration(sleepTime), imp.consecutiveFails)
+			}
 		}
 		if sleepTime < 10 {
 			sleepTime = 10
