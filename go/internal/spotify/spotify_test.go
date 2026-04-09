@@ -53,6 +53,14 @@ func TestLoadConfigMissingVars(t *testing.T) {
 		t.Setenv(key, "")
 	}
 
+	// Override HOME to a temp dir so ~/.spotexfil.conf isn't found
+	t.Setenv("HOME", t.TempDir())
+
+	// Run from a temp dir so ./.spotexfil.conf isn't found either
+	origDir, _ := os.Getwd()
+	os.Chdir(t.TempDir())
+	defer os.Chdir(origDir)
+
 	_, err := LoadConfig()
 	if err == nil {
 		t.Error("expected error for missing credentials")
