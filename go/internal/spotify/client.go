@@ -450,19 +450,23 @@ func (c *Client) WriteC2Playlists(ctx context.Context, encryptedDescs []string) 
 }
 
 // ReadC2Playlists reads and decrypts C2 playlists.
+// Optimized: filters by C2 tag from the playlist listing (1 API call)
+// instead of fetching full details for every playlist on the account.
 func (c *Client) ReadC2Playlists(ctx context.Context, channel, encryptionKey string, seq int) (map[int][]protocol.ChunkMeta, error) {
+	tag := protocol.ComputeC2Tag(encryptionKey)
+
 	playlists, err := c.GetAllPlaylists(ctx)
 	if err != nil {
 		return nil, err
 	}
 
+	// Filter by tag using description from listing (no extra API calls)
 	var descPairs []protocol.DescPair
 	for _, p := range playlists {
-		full, err := c.api.GetPlaylist(ctx, p.ID)
-		if err != nil {
-			continue
+		desc := html.UnescapeString(p.Description)
+		if !strings.HasPrefix(desc, tag) {
+			continue // skip non-C2 playlists (no API call)
 		}
-		desc := html.UnescapeString(full.Description)
 		descPairs = append(descPairs, protocol.DescPair{
 			PlaylistID:  string(p.ID),
 			Description: desc,
@@ -473,20 +477,17 @@ func (c *Client) ReadC2Playlists(ctx context.Context, channel, encryptionKey str
 }
 
 // CleanC2Playlists deletes C2 playlists matching channel and optional seq.
+// Optimized: filters by C2 tag from the listing before decrypting.
 func (c *Client) CleanC2Playlists(ctx context.Context, channel, encryptionKey string, seq int) error {
 	tag := protocol.ComputeC2Tag(encryptionKey)
+
 	playlists, err := c.GetAllPlaylists(ctx)
 	if err != nil {
 		return err
 	}
 
 	for _, p := range playlists {
-		full, err := c.api.GetPlaylist(ctx, p.ID)
-		if err != nil {
-			continue
-		}
-
-		desc := html.UnescapeString(full.Description)
+		desc := html.UnescapeString(p.Description)
 		if !strings.HasPrefix(desc, tag) {
 			continue
 		}

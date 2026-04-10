@@ -488,19 +488,17 @@ class Spot(Transport):
         Returns:
             Dict mapping seq -> list of (chunk_data, metadata_dict).
         """
-        from .protocol import read_c2_descriptions
+        from .protocol import read_c2_descriptions, compute_c2_tag
 
+        tag = compute_c2_tag(encryption_key)
         playlists = self._get_all_playlists()
         desc_pairs = []
 
+        # Filter by C2 tag from listing (no extra API calls)
         for p in playlists:
-            try:
-                full = self.spotipy.user_playlist(
-                    self.username, p['id']
-                )
-            except spotipy.SpotifyException:
-                continue
-            desc = html.unescape(full.get('description', ''))
+            desc = html.unescape(p.get('description', ''))
+            if not desc.startswith(tag):
+                continue  # skip non-C2 playlists
             desc_pairs.append((p['id'], desc))
 
         return read_c2_descriptions(
@@ -528,14 +526,7 @@ class Spot(Transport):
         playlists = self._get_all_playlists()
 
         for p in playlists:
-            try:
-                full = self.spotipy.user_playlist(
-                    self.username, p['id']
-                )
-            except spotipy.SpotifyException:
-                continue
-
-            desc = html.unescape(full.get('description', ''))
+            desc = html.unescape(p.get('description', ''))
             if not desc.startswith(tag):
                 continue
 
