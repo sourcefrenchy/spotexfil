@@ -488,16 +488,17 @@ class Spot(Transport):
         Returns:
             Dict mapping seq -> list of (chunk_data, metadata_dict).
         """
-        from .protocol import read_c2_descriptions, compute_c2_tag
+        from .protocol import read_c2_descriptions, compute_c2_tags
 
-        tag = compute_c2_tag(encryption_key)
+        tags = compute_c2_tags(encryption_key)
         playlists = self._get_all_playlists()
         desc_pairs = []
 
         # Filter by C2 tag from listing (no extra API calls)
+        # Check both current and previous hour window tags
         for p in playlists:
             desc = html.unescape(p.get('description', ''))
-            if not desc.startswith(tag):
+            if not any(desc.startswith(t) for t in tags):
                 continue  # skip non-C2 playlists
             desc_pairs.append((p['id'], desc))
 
@@ -519,15 +520,15 @@ class Spot(Transport):
             seq: If given, only delete playlists matching this seq.
         """
         from .protocol import (
-            compute_c2_tag, _decrypt_chunk_desc,
+            compute_c2_tags, _decrypt_chunk_desc,
         )
 
-        tag = compute_c2_tag(encryption_key)
+        tags = compute_c2_tags(encryption_key)
         playlists = self._get_all_playlists()
 
         for p in playlists:
             desc = html.unescape(p.get('description', ''))
-            if not desc.startswith(tag):
+            if not any(desc.startswith(t) for t in tags):
                 continue
 
             try:

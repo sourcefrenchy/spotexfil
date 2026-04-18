@@ -104,11 +104,30 @@ func TestEncryptDecryptChunkDesc(t *testing.T) {
 	}
 }
 
-func TestC2TagMatchesPython(t *testing.T) {
-	// From hmac_vectors.json: key="test-c2-key", label="spotexfil-c2-tag" -> truncated="f593aac363ef"
+func TestC2TagTimeWindowed(t *testing.T) {
+	// Tag is time-windowed: HMAC-SHA256(key, floor(epoch/3600))[:12]
 	tag := ComputeC2Tag("test-c2-key")
-	if tag != "f593aac363ef" {
-		t.Errorf("c2 tag: got %s, want f593aac363ef", tag)
+	if len(tag) != 12 {
+		t.Errorf("c2 tag length: got %d, want 12", len(tag))
+	}
+	// Same key should produce same tag within the same hour window
+	tag2 := ComputeC2Tag("test-c2-key")
+	if tag != tag2 {
+		t.Errorf("c2 tag not deterministic: got %s and %s", tag, tag2)
+	}
+	// Different key should produce different tag
+	tag3 := ComputeC2Tag("different-key")
+	if tag == tag3 {
+		t.Errorf("different keys produced same tag: %s", tag)
+	}
+	// ComputeC2Tags should return current tag as first element
+	tags := ComputeC2Tags("test-c2-key")
+	if tags[0] != tag {
+		t.Errorf("ComputeC2Tags[0] != ComputeC2Tag: got %s, want %s", tags[0], tag)
+	}
+	if tags[0] == tags[1] {
+		// This can only happen at hour boundary, very unlikely in tests
+		t.Log("current and previous tags are identical (hour boundary)")
 	}
 }
 

