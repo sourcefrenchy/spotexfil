@@ -25,7 +25,8 @@ class FakeSpotifyStore:
         has_more = offset + limit < len(self.playlists)
         return {
             'items': [
-                {'id': p['id'], 'name': p['name']}
+                {'id': p['id'], 'name': p['name'],
+                 'description': p.get('description', '')}
                 for p in items
             ],
             'next': 'more' if has_more else None,
