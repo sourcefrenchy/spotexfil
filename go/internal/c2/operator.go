@@ -97,12 +97,7 @@ func (op *Operator) PollResults() (map[int]map[string]interface{}, error) {
 		payload := protocol.ReassemblePayload(chunkMetas)
 		result, err := protocol.DecodeMessage(payload, op.key)
 		if err != nil {
-			errStr := strings.ToLower(err.Error())
-			if strings.Contains(errStr, "tag") || strings.Contains(errStr, "decrypt") || strings.Contains(errStr, "cipher") {
-				fmt.Printf("[!] Failed to decode result seq=%d: encryption key mismatch with implant?\n", seqNum)
-			} else {
-				fmt.Printf("[!] Failed to decode result seq=%d: %v\n", seqNum, err)
-			}
+			// Stale or corrupted result — discard silently
 			continue
 		}
 		// Handle checkin beacon
