@@ -331,7 +331,12 @@ func (op *Operator) Interactive() {
 		case "status":
 			op.printStatus()
 		default:
-			fmt.Printf("[!] Unknown command: %s. Type 'help'.\n", cmd)
+			// When attached, treat unknown commands as shell commands
+			if op.attachedClient != "" {
+				op.SendCommand("shell", map[string]interface{}{"cmd": line})
+			} else {
+				fmt.Printf("[!] Unknown command: %s. Type 'help'.\n", cmd)
+			}
 		}
 	}
 }
