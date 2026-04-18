@@ -206,8 +206,15 @@ func (op *Operator) startBackgroundPoller(stopCh chan struct{}) {
 
 // Interactive runs the interactive operator console.
 func (op *Operator) Interactive() {
-	fmt.Println("SpotExfil C2 Operator Console")
-	fmt.Printf("Polling every %ds. Type 'help' for commands.\n\n",
+	fmt.Println(`
+   _____ ____   ____ _____ _____ _  _ ___ ___ _
+  / ____|  _ \ / __ \_   _| ____| \/ |  _|_ _| |
+  \__ \| |_) | |  | || | |  _|  >  <| |_ | || |
+  |___/|  __/| |  | || | | |___/ /\ \  _|| || |___
+  |____/|_|    \____/ |_| |_____/_/  \_|_||___|_____|
+                  C2 OPERATOR CONSOLE
+`)
+	fmt.Printf("  Polling every %ds | Type 'help' for commands\n\n",
 		int(op.pollInterval.Seconds()))
 
 	// Initial check for pending checkins
