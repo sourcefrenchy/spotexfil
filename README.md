@@ -258,18 +258,34 @@ Other:
 | Cover names | Innocuous playlist names ("Chill Vibes #a3f2") |
 | Jittered polling | Configurable interval + random jitter |
 | Exponential backoff | Smart rate limit handling with auto-recovery |
+| Shutdown signal | Operator broadcasts encrypted shutdown on exit, implants detect it |
 | Random OAuth state | No tool fingerprint in OAuth flow |
+
+### API Optimization
+Spotify rate limits: ~180 requests per rolling 30-second window per app.
+
+| | Before | After |
+|---|---|---|
+| API calls per poll | 1 listing + N GetPlaylist (80+ on a real account) = **81 calls** | 1 listing + client-side tag filter = **1-3 calls** |
+| Effective req/30s at --interval 30 | ~160 (near limit) | ~2 (well under) |
+| Min safe interval | 60s+ | 20s |
+| Write block behavior | Everything backs off, implant goes deaf | Reads keep polling, only writes back off independently |
+
+The `SimplePlaylist` listing already includes the `description` field. C2 playlists are identified by their encrypted HMAC tag prefix client-side — no extra `GetPlaylist` API call needed. Personal playlists (80+) are skipped with zero API cost.
+
+Read (polling for commands) and write (checkin, sending results) have **independent backoff timers**. A Spotify write block doesn't stop the implant from receiving and executing commands.
 
 ### What an analyst sees on Spotify
 - Private playlists with names like "Morning Coffee #b7c2"
 - Descriptions are opaque encrypted blobs (HMAC tag + AES-GCM ciphertext)
 - No plaintext metadata, no sequential naming, no detectable patterns
 - Playlists are deleted within seconds of being read
+- HMAC tag rotates hourly — no permanent correlation across time windows
 
 ## Testing
 
 ```bash
-make test         # Run everything (Python 156+ tests + Go tests)
+make test         # Run everything (Python 157+ tests + Go tests)
 make test-python  # Python only
 make test-go      # Go only
 make lint         # Flake8
@@ -287,8 +303,8 @@ Python and Go implementations are wire-compatible:
 
 - ~1MB max payload (~2000 playlists)
 - Slow for large files (1 API call per 512-char chunk)
-- Spotify rate limits: ~180 req/30s, write blocks escalate to 24h
-- C2 polling adds latency (configurable, default 30-90s)
+- Spotify rate limits: ~180 req/30s rolling window, write blocks can escalate to 24h
+- C2 polling adds latency (configurable, default 20-60s)
 
 ## Disclaimer
 
