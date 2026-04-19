@@ -302,6 +302,15 @@ make test-go      # Go only
 make lint         # Flake8
 ```
 
+Test coverage includes:
+- **Crypto**: AES-GCM, PBKDF2, BLAKE2b, HMAC, X25519 ECDH, HKDF session key derivation
+- **Forward secrecy**: full key exchange simulation, session isolation, forward secrecy property verification
+- **Protocol resilience**: raw encode/decode, master-key fallback, operator restart scenario, implant fallback decryption
+- **Module registry**: dynamic register/unregister, concurrent access (race detector)
+- **Integration**: full C2 roundtrips, multi-command queue, channel isolation, cleanup
+- **Stress**: 100+ random payloads, concurrent encoding, edge cases
+- **Interop**: cross-language crypto validation against shared test vectors
+
 ## Cross-Language Interop
 
 Python and Go implementations are wire-compatible:

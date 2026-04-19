@@ -88,3 +88,52 @@ func TestModuleRegistry(t *testing.T) {
 		t.Error("expected nil for unknown module")
 	}
 }
+
+func TestModuleRegistryDynamic(t *testing.T) {
+	// Register a test module
+	testMod := &testModule{name: "test-dynamic"}
+	RegisterModule(testMod)
+	defer UnregisterModule("test-dynamic")
+
+	m := GetModule("test-dynamic")
+	if m == nil {
+		t.Fatal("test-dynamic not found after registration")
+	}
+	if m.Name() != "test-dynamic" {
+		t.Errorf("name: got %s", m.Name())
+	}
+
+	// Unregister
+	UnregisterModule("test-dynamic")
+	if GetModule("test-dynamic") != nil {
+		t.Error("test-dynamic found after unregistration")
+	}
+}
+
+func TestModuleRegistryConcurrency(t *testing.T) {
+	// Concurrent register/unregister/get should not race
+	done := make(chan struct{})
+	for i := 0; i < 10; i++ {
+		go func(id int) {
+			defer func() { done <- struct{}{} }()
+			name := "concurrent-" + string(rune('A'+id))
+			mod := &testModule{name: name}
+			RegisterModule(mod)
+			_ = GetModule(name)
+			_ = ListModules()
+			UnregisterModule(name)
+		}(i)
+	}
+	for i := 0; i < 10; i++ {
+		<-done
+	}
+}
+
+type testModule struct {
+	name string
+}
+
+func (m *testModule) Name() string { return m.name }
+func (m *testModule) Execute(args map[string]interface{}) (string, string) {
+	return "ok", "test"
+}
