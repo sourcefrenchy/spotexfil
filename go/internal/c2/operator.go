@@ -215,7 +215,10 @@ func (op *Operator) PollResults() (map[int]map[string]interface{}, error) {
 		}
 
 		if decErr != nil || result == nil {
-			// Can't decrypt — stale result from prior session, clean it up
+			// Can't decrypt — result from prior session (different X25519 keys)
+			// Mark in history as lost
+			op.recordResult(seqNum, "lost",
+				"(encrypted with prior session key — forward secrecy)")
 			_ = op.client.CleanC2Playlists(ctx,
 				protocol.ChannelRes, op.key, seqNum)
 			continue
@@ -1014,6 +1017,8 @@ func (op *Operator) printHistory() {
 			status = "\033[33mpending\033[0m"
 		} else if status == "ok" {
 			status = "\033[32mok\033[0m"
+		} else if status == "lost" {
+			status = "\033[90mlost\033[0m"
 		} else {
 			status = "\033[31m" + status + "\033[0m"
 		}
