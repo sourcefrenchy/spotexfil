@@ -100,19 +100,23 @@ class TestHmacVectors:
     def load_vectors(self):
         self.vectors = _load_vectors('hmac_vectors.json')
 
-    def test_c2_tag_vectors(self):
-        """HMAC tag derivation matches shared test vectors."""
-        for v in self.vectors:
-            key = v['key']
-            label = v['label']
+    def test_c2_tag_deterministic(self):
+        """C2 tag is deterministic within the same time window."""
+        tag1 = compute_c2_tag("test-key")
+        tag2 = compute_c2_tag("test-key")
+        assert tag1 == tag2
+        assert len(tag1) == 12
+        # Different keys produce different tags
+        tag3 = compute_c2_tag("other-key")
+        assert tag1 != tag3
 
-            if label == "spotexfil-c2-tag":
-                actual = compute_c2_tag(key)
-                expected = v['truncated']
-                assert actual == expected, (
-                    f"C2 tag mismatch for key={key!r}: "
-                    f"expected={expected}, got={actual}"
-                )
+    def test_c2_tags_returns_two(self):
+        """compute_c2_tags returns current and previous window."""
+        from spotexfil.protocol import compute_c2_tags
+        tags = compute_c2_tags("test-key")
+        assert len(tags) == 2
+        assert len(tags[0]) == 12
+        assert len(tags[1]) == 12
 
     def test_meta_key_vectors(self):
         """HMAC meta key derivation matches shared test vectors."""
