@@ -244,22 +244,33 @@ Other:
 ### Encryption
 - All payloads: AES-256-GCM with PBKDF2-SHA256 (480K iterations)
 - C2 metadata: AES-256-GCM with HMAC-derived fast key (no PBKDF2 per-playlist)
+- Forward secrecy: X25519 ECDH key exchange + HKDF-SHA256 session keys
 - Integrity: BLAKE2b-160 hash verified on decode
 
 ### Opsec Features
 | Feature | Description |
 |---------|-------------|
+| Forward secrecy | X25519 ECDH per session — past traffic undecryptable even if master key leaks |
 | Rotating tags | C2 playlist identifiers rotate hourly via time-windowed HMAC |
 | Auto-generated keys | Implant generates NATO-phonetic passphrase (never in argv/ps) |
 | Session binding | Crypto-random session ID prevents replay and cross-session leaks |
 | Timestamp validation | Commands older than 5 minutes rejected |
 | HMAC-SHA256 client IDs | 64-bit keyed identifiers (unforgeable without the key) |
-| Aggressive cleanup | Playlists deleted after read by both sides |
+| Heartbeat checkins | Implant re-announces every 60s so new operators see it within a minute |
+| Aggressive cleanup | Playlists deleted after read; orphaned results from dead sessions cleaned |
+| Plugin modules | Modules loadable as .so plugins at runtime (linux/macOS) |
+| Async execution | Commands run in goroutines; large exfils don't block command processing |
+| Shutdown signal | Operator broadcasts encrypted shutdown on exit, implants auto-reconnect |
 | Cover names | Innocuous playlist names ("Chill Vibes #a3f2") |
 | Jittered polling | Configurable interval + random jitter |
-| Exponential backoff | Smart rate limit handling with auto-recovery |
-| Shutdown signal | Operator broadcasts encrypted shutdown on exit, implants detect it |
+| Exponential backoff | Independent read/write backoff with auto-recovery |
 | Random OAuth state | No tool fingerprint in OAuth flow |
+
+### Resilience
+- **Operator restart**: implant heartbeats every 60s, new operator picks it up automatically
+- **Operator Ctrl+C** (no clean shutdown): implant continues polling, re-checkins on heartbeat
+- **Wrong key then correct key**: implant is invisible to wrong-key operator, visible to correct-key operator within 60s
+- **Forward secrecy trade-off**: pending results from a dead operator session are lost (by design — ephemeral X25519 keys only exist in memory)
 
 ### API Optimization
 Spotify rate limits: ~180 requests per rolling 30-second window per app.
@@ -315,4 +326,5 @@ This is a **proof-of-concept for educational and authorized security research pu
 - Account rotation support
 - Additional C2 modules (screenshot, persistence)
 - Multi-account relay / dead drops
+- Optional session key persistence for result recovery across operator restarts
 - Steganographic payload encoding
