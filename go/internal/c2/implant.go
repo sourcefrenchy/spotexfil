@@ -92,7 +92,7 @@ func NewImplant(client *spotify.Client, key string, interval, jitter int) *Impla
 		resultCh:        make(chan *protocol.C2Message, 32),
 		ephPriv:         ephPriv,
 		ephPub:          ephPub,
-		checkinInterval: 5 * time.Minute, // heartbeat every 5 min
+		checkinInterval: 60 * time.Second, // heartbeat every 60s
 	}
 }
 

