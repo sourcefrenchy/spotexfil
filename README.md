@@ -124,9 +124,12 @@ make lint         # Flake8 Python code
 # [*] Session key: bravo-kilo-seven-echo-tango-lima
 # [*] Use this key to start the operator:
 #     ./spotexfil c2-operator -k "bravo-kilo-seven-echo-tango-lima"
-# [*] Polling every 20-40s
-# [*] Session: a3f2b7c91e04
-# [*] Check-in sent (client_id=7f3a2b1c9e04d8f1) at 15:30:05
+#   Interval : 20-40s | Session : a3f2b7c91e04
+#   Client ID : 7f3a2b1c9e04d8f1
+#   X25519    : eb4debc295a5954dda3d...
+# [*] Implant active — polling for commands
+# [+] Check-in sent (7f3a2b1c) at 15:30:05
+# [+] Forward secrecy established at 15:30:20
 
 # Terminal 2: Operator (use the key shown by implant)
 ./spotexfil-darwin-arm64 c2-operator -k "bravo-kilo-seven-echo-tango-lima" --poll-interval 30
