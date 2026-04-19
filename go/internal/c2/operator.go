@@ -242,8 +242,30 @@ func (op *Operator) PollResults() (map[int]map[string]interface{}, error) {
 	return results, nil
 }
 
+// getHistoryResult checks if a result is already cached in history.
+func (op *Operator) getHistoryResult(seq int) map[string]interface{} {
+	for i := len(op.history) - 1; i >= 0; i-- {
+		h := op.history[i]
+		if h.Seq == seq && h.Status != "" && h.Status != "pending" {
+			return map[string]interface{}{
+				"module": h.Module,
+				"seq":    float64(h.Seq),
+				"status": h.Status,
+				"data":   h.Result,
+			}
+		}
+	}
+	return nil
+}
+
 // WaitForResult blocks until a specific result arrives or timeout.
 func (op *Operator) WaitForResult(seq int) (map[string]interface{}, error) {
+	// Check history first — result may already be cached
+	if cached := op.getHistoryResult(seq); cached != nil {
+		fmt.Printf("[*] Result for seq=%d found in history\n", seq)
+		return cached, nil
+	}
+
 	timeout := time.Duration(shared.Proto.C2.WaitTimeout) * time.Second
 	pollInterval := time.Duration(shared.Proto.C2.WaitPollInterval) * time.Second
 
@@ -255,6 +277,11 @@ func (op *Operator) WaitForResult(seq int) (map[string]interface{}, error) {
 		}
 		if result, ok := results[seq]; ok {
 			return result, nil
+		}
+		// Check history again (background poller may have received it)
+		if cached := op.getHistoryResult(seq); cached != nil {
+			fmt.Printf("[*] Result for seq=%d found in history\n", seq)
+			return cached, nil
 		}
 		remaining := timeout - time.Since(start)
 		fmt.Printf("[*] Waiting for seq=%d... (%ds remaining)\n",
