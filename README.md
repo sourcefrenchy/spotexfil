@@ -275,7 +275,8 @@ Other:
 - **Operator restart**: implant heartbeats every 60s, new operator picks it up automatically
 - **Operator Ctrl+C** (no clean shutdown): implant continues polling, re-checkins on heartbeat
 - **Wrong key then correct key**: implant is invisible to wrong-key operator, visible to correct-key operator within 60s
-- **Forward secrecy trade-off**: pending results from a dead operator session are lost (by design — ephemeral X25519 keys only exist in memory)
+- **Forward secrecy trade-off**: results from a dead operator session are marked `lost` in history (encrypted with prior X25519 keys — by design). Re-send the command after reconnecting.
+- **Persistent history**: `~/.spotexfil-history.json` survives operator restarts. Use `history` to see all past commands/results, `result <seq>` for full details including output and latency.
 
 ### API Optimization
 Spotify rate limits: ~180 requests per rolling 30-second window per app.
