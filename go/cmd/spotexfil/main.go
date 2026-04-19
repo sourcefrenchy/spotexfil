@@ -242,7 +242,14 @@ func c2OperatorCmd() *cobra.Command {
 				key = os.Getenv("SPOTEXFIL_KEY")
 			}
 			if key == "" {
-				return fmt.Errorf("encryption key required: use -k, --key-file, or SPOTEXFIL_KEY env var")
+				// Prompt interactively
+				fmt.Print("[?] Enter session key: ")
+				var input string
+				fmt.Scanln(&input)
+				key = strings.TrimSpace(input)
+				if key == "" {
+					return fmt.Errorf("no key provided")
+				}
 			}
 
 			cfg, err := spotify.LoadConfig()
