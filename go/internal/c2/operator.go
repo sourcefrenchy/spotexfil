@@ -291,36 +291,47 @@ func (op *Operator) WaitForResult(seq int) (map[string]interface{}, error) {
 	return nil, fmt.Errorf("timeout waiting for seq=%d", seq)
 }
 
-// checkForCheckins polls for new implant check-ins and results.
+// checkForCheckins polls for checkins and (if attached) results.
 // Returns true if anything was found.
 func (op *Operator) checkForCheckins() bool {
+	// Always poll — this handles checkins + results
 	results, err := op.PollResults()
 	if err != nil {
 		wait := handleAPIError(err, "poll")
-		if wait > 600 {
-			// Hard block -- slow down the poller dramatically
-			op.pollBackoff = time.Duration(wait) * time.Second
-		} else if wait > 0 {
+		if wait > 0 {
 			op.pollBackoff = time.Duration(wait) * time.Second
 		}
 		return false
 	}
-	op.pollBackoff = 0 // reset on success
+	op.pollBackoff = 0
 	op.lastPoll = time.Now()
-	if len(results) > 0 {
-		seqs := make([]int, 0, len(results))
-		for s := range results {
-			seqs = append(seqs, s)
-		}
-		sort.Ints(seqs)
-		for _, s := range seqs {
-			fmt.Println()
-			displayResult(s, results[s])
-			fmt.Print(op.prompt())
-		}
-		return true
+
+	if len(results) == 0 {
+		return false
 	}
-	return false
+
+	// Only display results for the currently attached agent
+	if op.attachedClient == "" {
+		return true // cached in history, will show when user attaches + types 'results'
+	}
+
+	seqs := make([]int, 0, len(results))
+	for s := range results {
+		seqs = append(seqs, s)
+	}
+	sort.Ints(seqs)
+	for _, s := range seqs {
+		// Only show results belonging to the attached agent
+		for i := len(op.history) - 1; i >= 0; i-- {
+			if op.history[i].Seq == s && op.history[i].ClientID == op.attachedClient {
+				fmt.Println()
+				displayResult(s, results[s])
+				fmt.Print(op.prompt())
+				break
+			}
+		}
+	}
+	return true
 }
 
 // startBackgroundPoller runs a goroutine that continuously polls
