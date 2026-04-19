@@ -217,6 +217,11 @@ Commands (when attached, type directly or use prefix):
   exfil <path>    Exfiltrate a file
   sysinfo         Gather system info
 
+History:
+  history         Show command history (last 20, persisted across restarts)
+  shellhist       Alias for history
+  result <seq>    Show detailed result for a specific seq number
+
 Other:
   results         Poll for pending results
   wait <seq>      Wait for a specific result
