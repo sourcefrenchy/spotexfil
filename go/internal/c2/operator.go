@@ -20,6 +20,26 @@ import (
 	"github.com/sourcefrenchy/spotexfil/internal/spotify"
 )
 
+// Cute names assigned to agents on first connect (50 unique).
+var cuteNames = []string{
+	// Stars
+	"Vega", "Rigel", "Sirius", "Lyra", "Nova",
+	"Polaris", "Altair", "Castor", "Deneb", "Spica",
+	// Planets & moons
+	"Pluto", "Ceres", "Luna", "Titan", "Europa",
+	"Io", "Triton", "Oberon", "Ariel", "Calypso",
+	// Scientists
+	"Kepler", "Tesla", "Curie", "Darwin", "Euler",
+	"Fermi", "Gauss", "Hubble", "Planck", "Sagan",
+	// Flowers & plants
+	"Iris", "Lotus", "Aster", "Poppy", "Daisy",
+	"Sage", "Ivy", "Wren", "Maple", "Cedar",
+	// Cosmic
+	"Cosmos", "Comet", "Atlas", "Nebula", "Quasar",
+	"Pulsar", "Zenith", "Apogee", "Solstice", "Aurora",
+}
+var cuteNameIdx int
+
 // ClientInfo holds information about a connected implant.
 type ClientInfo struct {
 	Hostname    string
@@ -28,6 +48,7 @@ type ClientInfo struct {
 	ConnectedAt string
 	PID         int
 	SessionID   string
+	Alias       string
 }
 
 // HistoryEntry records a command and its result.
@@ -521,8 +542,8 @@ func (op *Operator) prompt() string {
 	ts := time.Now().Format("15:04")
 	if op.attachedClient != "" {
 		info := op.connectedClients[op.attachedClient]
-		return fmt.Sprintf("[%s] %s@%s > ",
-			ts, op.attachedClient[:8], info.Hostname)
+		return fmt.Sprintf("[%s] \033[1m%s\033[0m@%s > ",
+			ts, info.Alias, info.Hostname)
 	}
 	return fmt.Sprintf("[%s] c2> ", ts)
 }
@@ -533,51 +554,53 @@ func (op *Operator) printAgents() {
 		fmt.Println("[*] No agents connected")
 		return
 	}
-	fmt.Printf("\n  %-10s %-16s %-20s %-10s %s\n",
-		"ID", "HOSTNAME", "OS", "USER", "CONNECTED")
-	fmt.Printf("  %-10s %-16s %-20s %-10s %s\n",
-		"----------", "----------------", "--------------------",
+	fmt.Printf("\n  %-10s %-10s %-14s %-16s %-10s %s\n",
+		"NAME", "ID", "OS", "HOSTNAME", "USER", "CONNECTED")
+	fmt.Printf("  %-10s %-10s %-14s %-16s %-10s %s\n",
+		"----------", "----------", "--------------", "----------------",
 		"----------", "-------------------")
 	for cid, info := range op.connectedClients {
 		marker := "  "
 		if cid == op.attachedClient {
-			marker = "* "
+			marker = "\033[32m> \033[0m"
 		}
-		fmt.Printf("%s%-10s %-16s %-20s %-10s %s\n",
-			marker, cid[:8], info.Hostname, info.OS,
-			info.User, info.ConnectedAt)
+		fmt.Printf("%s\033[1m%-10s\033[0m %-10s %-14s %-16s %-10s %s\n",
+			marker, info.Alias, cid[:8], info.OS,
+			info.Hostname, info.User, info.ConnectedAt)
 	}
 	fmt.Println()
 }
 
 // attachAgent attaches to a specific agent by client_id (or prefix).
-func (op *Operator) attachAgent(idPrefix string) {
-	if idPrefix == "" {
+func (op *Operator) attachAgent(idOrAlias string) {
+	if idOrAlias == "" {
 		// If only one agent, auto-attach
 		if len(op.connectedClients) == 1 {
-			for cid := range op.connectedClients {
+			for cid, info := range op.connectedClients {
 				op.attachedClient = cid
-				info := op.connectedClients[cid]
-				fmt.Printf("[*] Attached to %s (%s)\n",
-					cid[:8], info.Hostname)
+				fmt.Printf("[*] Attached to \033[1m%s\033[0m (%s)\n",
+					info.Alias, info.Hostname)
 				return
 			}
 		}
-		fmt.Println("[!] Usage: attach <client_id>")
+		fmt.Println("[!] Usage: attach <name or id>")
 		fmt.Println("[!] Use 'agents' to list connected implants")
 		return
 	}
 
-	// Match by prefix
+	search := strings.ToLower(idOrAlias)
+
+	// Match by alias (case-insensitive) or client_id prefix
 	for cid, info := range op.connectedClients {
-		if strings.HasPrefix(cid, idPrefix) {
+		if strings.ToLower(info.Alias) == search ||
+			strings.HasPrefix(cid, idOrAlias) {
 			op.attachedClient = cid
-			fmt.Printf("[*] Attached to %s (%s)\n",
-				cid[:8], info.Hostname)
+			fmt.Printf("[*] Attached to \033[1m%s\033[0m (%s)\n",
+				info.Alias, info.Hostname)
 			return
 		}
 	}
-	fmt.Printf("[!] No agent matching '%s'. Use 'agents' to list.\n", idPrefix)
+	fmt.Printf("[!] No agent matching '%s'. Use 'agents' to list.\n", idOrAlias)
 }
 
 // detachAgent detaches from the current agent.
@@ -587,8 +610,8 @@ func (op *Operator) detachAgent() {
 		return
 	}
 	info := op.connectedClients[op.attachedClient]
-	fmt.Printf("[*] Detached from %s (%s)\n",
-		op.attachedClient[:8], info.Hostname)
+	fmt.Printf("[*] Detached from \033[1m%s\033[0m (%s)\n",
+		info.Alias, info.Hostname)
 	op.attachedClient = ""
 }
 
@@ -617,7 +640,7 @@ func (op *Operator) interactiveShell(scanner *bufio.Scanner) {
 		shellType = "powershell"
 	}
 
-	shellPrompt := fmt.Sprintf("%s@%s %s ", clientID[:8], info.Hostname, promptChar)
+	shellPrompt := fmt.Sprintf("\033[1m%s\033[0m@%s %s ", info.Alias, info.Hostname, promptChar)
 
 	fmt.Printf("\n\033[36m[*] Interactive shell to %s (%s)\033[0m\n",
 		info.Hostname, info.OS)
@@ -783,12 +806,13 @@ func (op *Operator) printStatus() {
 	if len(op.connectedClients) > 0 {
 		fmt.Printf("[*] Connected implants (%d):\n", len(op.connectedClients))
 		for cid, info := range op.connectedClients {
-			fs := "no"
+			fs := "\033[33mno\033[0m"
 			if _, ok := op.sessionKeys[cid]; ok {
-				fs = "yes"
+				fs = "\033[32myes\033[0m"
 			}
-			fmt.Printf("  %s  %s  %s  since %s  fs=%s\n",
-				cid, info.Hostname, info.OS, info.ConnectedAt, fs)
+			fmt.Printf("  \033[1m%-10s\033[0m %s  %s  fs=%s\n",
+				info.Alias, info.Hostname, info.OS, fs)
+			_ = cid
 		}
 	} else {
 		fmt.Println("[*] No implants connected")
@@ -845,6 +869,10 @@ func (op *Operator) handleCheckin(result map[string]interface{}) {
 	}
 	timestamp := time.Now().Format("2006-01-02 15:04:05")
 
+	// Assign a cute alias
+	alias := cuteNames[cuteNameIdx%len(cuteNames)]
+	cuteNameIdx++
+
 	op.connectedClients[clientID] = ClientInfo{
 		Hostname:    hostname,
 		OS:          osInfo,
@@ -852,16 +880,17 @@ func (op *Operator) handleCheckin(result map[string]interface{}) {
 		ConnectedAt: timestamp,
 		PID:         pid,
 		SessionID:   sessionID,
+		Alias:       alias,
 	}
 
-	fmt.Printf("\n[+] New implant connected!\n"+
+	fmt.Printf("\n\033[32m[+] New implant: \033[1m%s\033[0m\n"+
+		"    alias     : \033[1m%s\033[0m\n"+
 		"    client_id : %s\n"+
-		"    session   : %s\n"+
 		"    hostname  : %s\n"+
 		"    os        : %s\n"+
 		"    user      : %s\n"+
 		"    timestamp : %s\n\n%s",
-		clientID, sessionID[:12], hostname, osInfo, user, timestamp,
+		alias, alias, clientID[:8], hostname, osInfo, user, timestamp,
 		op.prompt())
 
 	// Negotiate forward secrecy if implant sent a pubkey
