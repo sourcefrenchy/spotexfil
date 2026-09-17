@@ -189,6 +189,70 @@ func TestLoadHistoryRebuildsIndex(t *testing.T) {
 	}
 }
 
+func TestSessionKeyPersistence(t *testing.T) {
+	op := newTestOperator(t)
+	op.persistSession = true
+	op.sessionFile = filepath.Join(t.TempDir(), "session.json")
+
+	// No store yet — nothing to load
+	op.loadSessionKeys()
+
+	// Store a key and save
+	op.mu.Lock()
+	op.sessionKeys["cafe0123456789ab"] = []byte("0123456789abcdef0123456789abcdef")
+	op.saveSessionKeysLocked()
+	op.mu.Unlock()
+
+	// File must exist and must NOT contain the raw key
+	data, err := os.ReadFile(op.sessionFile)
+	if err != nil {
+		t.Fatalf("session store not written: %v", err)
+	}
+	if strings.Contains(string(data), "0123456789abcdef") {
+		t.Error("session store contains raw key material")
+	}
+	info, _ := os.Stat(op.sessionFile)
+	if info.Mode().Perm() != 0600 {
+		t.Errorf("session store perms: got %o, want 600", info.Mode().Perm())
+	}
+
+	// New operator with same master key restores the key
+	op2 := newTestOperator(t)
+	op2.persistSession = true
+	op2.sessionFile = op.sessionFile
+	op2.loadSessionKeys()
+	op2.mu.RLock()
+	sk, ok := op2.sessionKeys["cafe0123456789ab"]
+	op2.mu.RUnlock()
+	if !ok || string(sk) != "0123456789abcdef0123456789abcdef" {
+		t.Errorf("restored key mismatch: ok=%v key=%q", ok, sk)
+	}
+
+	// Different master key cannot restore
+	op3 := newTestOperator(t)
+	op3.key = "wrong-key"
+	op3.persistSession = true
+	op3.sessionFile = op.sessionFile
+	op3.loadSessionKeys()
+	op3.mu.RLock()
+	_, ok = op3.sessionKeys["cafe0123456789ab"]
+	op3.mu.RUnlock()
+	if ok {
+		t.Error("wrong master key restored a session key")
+	}
+}
+
+func TestSessionPersistenceDisabledByDefault(t *testing.T) {
+	op := newTestOperator(t) // persistSession false
+	op.mu.Lock()
+	op.sessionKeys["abc"] = []byte("0123456789abcdef0123456789abcdef")
+	op.saveSessionKeysLocked()
+	op.mu.Unlock()
+	if _, err := os.Stat(op.sessionFile); !os.IsNotExist(err) {
+		t.Error("session file written despite persistence disabled")
+	}
+}
+
 func TestPromptWithAndWithoutAttach(t *testing.T) {
 	op := newTestOperator(t)
 

@@ -40,7 +40,7 @@ More info at [Exfiltration Series: SpotExfil](https://medium.com/@jeanmichel.amb
 - **Interactive shell** (`ishell`) -- remote shell with command queuing, auto-detects bash/powershell
 - **Direct shell on attach** -- type commands directly when attached (no `shell` prefix needed)
 - **Auto check-in** -- implants announce themselves, operator sees connections in real-time
-- **Modules**: shell (exec commands), exfil (read files), sysinfo (OS/network recon)
+- **Modules**: shell (exec commands), exfil (read files), push (write files to target), screenshot (screen capture), sysinfo (OS/network recon)
 - **Smart rate limiting** -- exponential backoff, human-readable error messages, auto-recovery
 - **Parallel uploads** -- bounded worker pool (4 workers) with per-chunk retries, ~4x faster large sends
 - **Cached cover traffic** -- filler-track artist lookup resolved once per process, not per playlist
@@ -216,6 +216,8 @@ Commands (when attached, type directly or use prefix):
   ishell          Interactive remote shell (auto-detects bash/powershell)
   <any command>   Sent as shell command to attached agent
   exfil <path>    Exfiltrate a file
+  push <l> <r>    Push local file <l> to remote path <r>
+  screenshot [n]  Capture the target's screen (saved as JPEG locally)
   sysinfo         Gather system info
 
 History:
@@ -276,7 +278,7 @@ Other:
 - **Operator restart**: implant heartbeats every 60s, new operator picks it up automatically
 - **Operator Ctrl+C** (no clean shutdown): implant continues polling, re-checkins on heartbeat
 - **Wrong key then correct key**: implant is invisible to wrong-key operator, visible to correct-key operator within 60s
-- **Forward secrecy trade-off**: results from a dead operator session are marked `lost` in history (encrypted with prior X25519 keys — by design). Re-send the command after reconnecting.
+- **Forward secrecy trade-off**: results from a dead operator session are marked `lost` in history (encrypted with prior X25519 keys — by design). Re-send the command after reconnecting. Opt-in workaround: `c2-operator --persist-session` stores session keys encrypted on disk (`~/.spotexfil-session`, 0600, AES-GCM with an HMAC-derived key from the master key) so a restarted operator can still decrypt in-flight results — at the cost of forward secrecy across restarts.
 - **Persistent history**: `~/.spotexfil-history.json` survives operator restarts. Use `history` to see all past commands/results, `result <seq>` for full details including output and latency.
 
 ### API Optimization
@@ -337,7 +339,6 @@ This is a **proof-of-concept for educational and authorized security research pu
 ## TODO
 
 - Account rotation support
-- Additional C2 modules (screenshot, persistence)
+- Additional C2 modules (persistence, clipboard)
 - Multi-account relay / dead drops
-- Optional session key persistence for result recovery across operator restarts
 - Steganographic payload encoding

@@ -225,6 +225,7 @@ func c2ImplantCmd() *cobra.Command {
 func c2OperatorCmd() *cobra.Command {
 	var key, keyFile string
 	var pollInterval int
+	var persistSession bool
 
 	cmd := &cobra.Command{
 		Use:   "c2-operator",
@@ -262,7 +263,7 @@ func c2OperatorCmd() *cobra.Command {
 				return err
 			}
 
-			operator := c2.NewOperator(client, key, pollInterval)
+			operator := c2.NewOperator(client, key, pollInterval, persistSession)
 			operator.Interactive()
 			return nil
 		},
@@ -271,6 +272,8 @@ func c2OperatorCmd() *cobra.Command {
 	cmd.Flags().StringVarP(&key, "key", "k", "", "Encryption passphrase")
 	cmd.Flags().StringVar(&keyFile, "key-file", "", "Path to file containing encryption passphrase")
 	cmd.Flags().IntVar(&pollInterval, "poll-interval", 30, "Background poll interval in seconds (default 30)")
+	cmd.Flags().BoolVar(&persistSession, "persist-session", false,
+		"Persist session keys (encrypted) across restarts for result recovery (weakens forward secrecy)")
 
 	return cmd
 }

