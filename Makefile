@@ -1,9 +1,8 @@
 BINARY=spotexfil
 VERSION=$(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 LDFLAGS=-ldflags "-s -w -X main.version=$(VERSION)"
-PYTHON=/Library/Developer/CommandLineTools/usr/bin/python3.9
 
-.PHONY: all darwin linux windows clean test test-python test-go lint build
+.PHONY: all darwin linux windows clean test lint build
 
 # --- Build targets ---
 
@@ -23,24 +22,16 @@ windows:
 
 # --- Test targets ---
 
-test: test-python test-go
-	@echo "All tests passed"
-
-test-python:
-	cd python && $(PYTHON) -m pytest tests/ -v --tb=short
-
-test-go:
-	cd go && go test ./...
+test:
+	cd go && go test -race ./...
 
 # --- Lint ---
 
 lint:
-	cd python && flake8 --max-line-length=100 spotexfil/*.py spotexfil/modules/*.py tests/*.py
+	cd go && go vet ./...
 
 # --- Clean ---
 
 clean:
 	rm -rf dist/
 	cd go && go clean
-	find . -name __pycache__ -type d -exec rm -rf {} + 2>/dev/null || true
-	find . -name '*.pyc' -delete 2>/dev/null || true

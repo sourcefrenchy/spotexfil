@@ -4,7 +4,7 @@
 
 A proof-of-concept covert channel and C2 framework that uses Spotify playlist descriptions as a communication medium, 512 characters at a time.
 
-Available as both **Python** and **Go** implementations with wire-compatible encrypted payloads.
+Implemented in **Go** — a single standalone binary with no runtime dependencies.
 
 More info at [Exfiltration Series: SpotExfil](https://medium.com/@jeanmichel.amblat/exfiltration-series-spotexfil-9aee76382b74)
 
@@ -29,7 +29,7 @@ More info at [Exfiltration Series: SpotExfil](https://medium.com/@jeanmichel.amb
 - **Smart rate limiting** -- exponential backoff, human-readable error messages, auto-recovery
 
 ### Infrastructure
-- **Dual language** -- Python package + standalone Go binary (no runtime needed)
+- **Standalone binary** -- no runtime needed, static Go build
 - **Cross-platform binaries** -- macOS (Apple Silicon), Linux (x64), Windows (x64), stripped
 - **Stealth** -- cover playlist names, random filler tracks, jittered polling, aggressive cleanup
 - **Config file support** (`~/.spotexfil.conf`) so env vars are optional
@@ -38,31 +38,18 @@ More info at [Exfiltration Series: SpotExfil](https://medium.com/@jeanmichel.amb
 
 ```
 spotexfil/
-├── shared/                  # Wire format specs (single source of truth)
-│   ├── protocol.json        # Crypto constants, transport params
-│   ├── modules.yaml         # C2 module definitions
-│   └── test_vectors/        # Cross-language crypto validation
-├── python/                  # Python implementation
-│   ├── spotexfil/           # Package with ABCs, crypto, transport, C2
-│   │   ├── interfaces.py    # CryptoProvider, Transport, C2Module ABCs
-│   │   ├── crypto.py        # AES-GCM, PBKDF2, BLAKE2b
-│   │   ├── transport.py     # Spotify API wrapper
-│   │   ├── protocol.py      # C2 message serialization
-│   │   ├── implant.py       # C2 implant daemon
-│   │   ├── operator.py      # C2 operator console
-│   │   ├── modules/         # Pluggable module registry
-│   │   └── cli.py           # Unified CLI
-│   └── tests/               # 156+ tests
-├── go/                      # Go implementation
-│   ├── cmd/spotexfil/       # Cobra CLI
+├── go/
+│   ├── cmd/spotexfil/       # Cobra CLI entrypoint
 │   ├── internal/
-│   │   ├── crypto/          # AES-GCM, PBKDF2, BLAKE2b, HMAC
+│   │   ├── crypto/          # AES-GCM, PBKDF2, BLAKE2b, HMAC, X25519
+│   │   │   └── testdata/    # Crypto test vectors
 │   │   ├── encoding/        # File exfil pipeline
 │   │   ├── protocol/        # C2 messages, encrypted descriptions
+│   │   ├── shared/          # Embedded protocol.json (constants)
 │   │   ├── spotify/         # zmb3/spotify/v2 wrapper
 │   │   └── c2/              # Implant, operator, module registry
 │   └── go.mod
-├── Makefile                 # Build + test both languages
+├── Makefile                 # Build + test
 └── README.md
 ```
 
@@ -91,25 +78,19 @@ redirect_uri = http://127.0.0.1:8888/callback
 
 ## Installation
 
-### Go (pre-built binaries, no runtime needed)
+### Pre-built binaries (no runtime needed)
 
 Download the appropriate binary from `dist/`:
 - `spotexfil-darwin-arm64` -- macOS Apple Silicon
 - `spotexfil-linux-amd64` -- Linux x64
 - `spotexfil-windows-amd64.exe` -- Windows x64
 
-### Python (from source)
-
-```bash
-cd python && pip install -r requirements.txt
-```
-
 ### Build from source
 
 ```bash
-make all          # Cross-compile Go binaries for all platforms
-make test         # Run both Python and Go test suites
-make lint         # Flake8 Python code
+make all          # Cross-compile binaries for all platforms
+make test         # Run the test suite (with race detector)
+make lint         # go vet
 ```
 
 ## Usage
@@ -305,10 +286,7 @@ Read (polling for commands) and write (checkin, sending results) have **independ
 ## Testing
 
 ```bash
-make test         # Run everything (Python 157+ tests + Go tests)
-make test-python  # Python only
-make test-go      # Go only
-make lint         # Flake8
+make test         # Run all tests (go test -race)
 ```
 
 Test coverage includes:
@@ -318,15 +296,7 @@ Test coverage includes:
 - **Module registry**: dynamic register/unregister, concurrent access (race detector)
 - **Integration**: full C2 roundtrips, multi-command queue, channel isolation, cleanup
 - **Stress**: 100+ random payloads, concurrent encoding, edge cases
-- **Interop**: cross-language crypto validation against shared test vectors
-
-## Cross-Language Interop
-
-Python and Go implementations are wire-compatible:
-- **Go operator** sends commands to **Python implant**
-- **Python operator** sends commands to **Go implant**
-- File exfil payloads interchangeable
-- Shared test vectors enforce crypto compatibility
+- **Test vectors**: crypto validation against shared vectors in `go/internal/crypto/testdata/`
 
 ## Limitations
 

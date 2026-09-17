@@ -6,13 +6,11 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"runtime"
 	"testing"
 )
 
 func testVectorPath(name string) string {
-	_, filename, _, _ := runtime.Caller(0)
-	return filepath.Join(filepath.Dir(filename), "..", "..", "..", "shared", "test_vectors", name)
+	return filepath.Join("testdata", "test_vectors", name)
 }
 
 // --- KDF vectors ---

@@ -1,13 +1,8 @@
 **/.idea/*
 .cache-*
-*.pyc
-__pycache__
 payload.bin
-auth_test.py
 .env
 *.key
 .spotexfil.conf
 dist/
 build/
-*.spec
-.pytest_cache/
