@@ -60,11 +60,32 @@ type spotipyCache struct {
 	RefreshToken string `json:"refresh_token"`
 }
 
-// NewClient creates an authenticated Spotify client.
+// ClientOptions controls authentication and token persistence behavior.
+type ClientOptions struct {
+	UseCoverNames bool
+	AllowOAuth    bool   // interactive browser OAuth flow permitted (operator side)
+	PersistToken  bool   // write .cache-<username> after successful auth
+	TokenFile     string // explicit path to a spotipy-format token JSON (optional)
+}
+
+// NewClient creates an authenticated Spotify client with the default
+// (operator-side) behavior: interactive OAuth allowed and token persisted.
 // It tries (in order):
 //  1. Read cached spotipy token (.cache-<username>)
 //  2. Run local OAuth2 callback server for browser-based auth
 func NewClient(cfg *Config, useCoverNames bool) (*Client, error) {
+	return NewClientWithOptions(cfg, ClientOptions{
+		UseCoverNames: useCoverNames,
+		AllowOAuth:    true,
+		PersistToken:  true,
+	})
+}
+
+// NewClientWithOptions creates an authenticated Spotify client, resolving
+// the token according to opts (see resolveToken for the priority order).
+// The interactive OAuth flow and the .cache-<username> write are only
+// performed when explicitly allowed by opts.
+func NewClientWithOptions(cfg *Config, opts ClientOptions) (*Client, error) {
 	auth := spotifyauth.New(
 		spotifyauth.WithClientID(cfg.ClientID),
 		spotifyauth.WithClientSecret(cfg.ClientSecret),
@@ -77,10 +98,12 @@ func NewClient(cfg *Config, useCoverNames bool) (*Client, error) {
 		),
 	)
 
-	// Try cached token first
-	token, err := loadCachedToken(cfg, auth)
+	token, err := resolveToken(cfg, opts, auth)
 	if err != nil {
-		// No cache — run OAuth2 flow with local callback server
+		return nil, err
+	}
+	if token == nil {
+		// No pre-staged token — run OAuth2 flow with local callback server
 		fmt.Println("[*] No cached token found, starting OAuth2 flow...")
 		token, err = runOAuthFlow(cfg, auth)
 		if err != nil {
@@ -98,6 +121,9 @@ func NewClient(cfg *Config, useCoverNames bool) (*Client, error) {
 		errStr := strings.ToLower(err.Error())
 		if strings.Contains(errStr, "401") || strings.Contains(errStr, "expired") ||
 			strings.Contains(errStr, "unauthorized") {
+			if !opts.AllowOAuth {
+				return nil, fmt.Errorf("Spotify token expired or unauthorized and interactive OAuth is disabled: pre-stage a fresh token via SPOTIFY_TOKEN_JSON or --token-file")
+			}
 			fmt.Println("[*] Token expired, re-authenticating...")
 			token, err = runOAuthFlow(cfg, auth)
 			if err != nil {
@@ -116,14 +142,87 @@ func NewClient(cfg *Config, useCoverNames bool) (*Client, error) {
 		fmt.Println("[*] API connection verified")
 	}
 
-	// Save refreshed token for future use
-	_ = saveCachedToken(cfg, token)
+	// Save refreshed token for future use (only if persistence is allowed)
+	if opts.PersistToken {
+		_ = saveCachedToken(cfg, token)
+	}
 
 	return &Client{
 		api:           api,
 		userID:        cfg.Username,
-		useCoverNames: useCoverNames,
+		useCoverNames: opts.UseCoverNames,
 	}, nil
+}
+
+// resolveToken resolves a Spotify token from pre-staged sources, in order:
+//  1. opts.TokenFile (spotipy cache JSON at an explicit path)
+//  2. SPOTIFY_TOKEN_JSON env var (same JSON, inline)
+//  3. .cache-<username> file (existing loadCachedToken logic)
+//  4. Interactive OAuth flow — only if opts.AllowOAuth is true.
+//
+// A (nil, nil) return means no pre-staged token was found and the caller
+// should run the interactive OAuth flow (only possible when AllowOAuth is
+// true; otherwise an error is returned).
+func resolveToken(cfg *Config, opts ClientOptions, auth *spotifyauth.Authenticator) (*oauth2.Token, error) {
+	// 1. Explicit token file
+	if opts.TokenFile != "" {
+		if data, err := os.ReadFile(opts.TokenFile); err == nil {
+			if token, err := tokenFromCacheJSON(data); err == nil {
+				fmt.Printf("[*] Loaded token from %s\n", opts.TokenFile)
+				return token, nil
+			}
+			fmt.Printf("[!] Token file %s unreadable or invalid, falling through\n", opts.TokenFile)
+		}
+	}
+
+	// 2. Inline token JSON from environment
+	if data := os.Getenv("SPOTIFY_TOKEN_JSON"); data != "" {
+		if token, err := tokenFromCacheJSON([]byte(data)); err == nil {
+			fmt.Println("[*] Loaded token from SPOTIFY_TOKEN_JSON")
+			return token, nil
+		}
+		fmt.Println("[!] SPOTIFY_TOKEN_JSON malformed, falling through")
+	}
+
+	// 3. spotipy .cache-<username> file
+	if token, err := loadCachedToken(cfg, auth); err == nil {
+		return token, nil
+	}
+
+	// 4. Interactive OAuth — only when permitted
+	if !opts.AllowOAuth {
+		return nil, fmt.Errorf("no Spotify token available: pre-stage one via SPOTIFY_TOKEN_JSON or --token-file (interactive OAuth disabled)")
+	}
+	return nil, nil
+}
+
+// tokenFromCacheJSON parses a spotipy-format cache JSON blob into an
+// oauth2.Token. It returns an error if the JSON is malformed or the token
+// is unusable (expired with no refresh token).
+func tokenFromCacheJSON(data []byte) (*oauth2.Token, error) {
+	var cache spotipyCache
+	if err := json.Unmarshal(data, &cache); err != nil {
+		return nil, err
+	}
+
+	token := &oauth2.Token{
+		AccessToken:  cache.AccessToken,
+		TokenType:    cache.TokenType,
+		RefreshToken: cache.RefreshToken,
+		Expiry:       time.Unix(cache.ExpiresAt, 0),
+	}
+
+	// If expired but we have a refresh token, let oauth2 handle refresh
+	if token.RefreshToken != "" {
+		return token, nil
+	}
+
+	// If not expired, use directly
+	if time.Now().Before(token.Expiry) {
+		return token, nil
+	}
+
+	return nil, fmt.Errorf("token expired and no refresh token available")
 }
 
 // loadCachedToken reads spotipy's .cache-<username> file.
@@ -144,29 +243,13 @@ func loadCachedToken(cfg *Config, auth *spotifyauth.Authenticator) (*oauth2.Toke
 			continue
 		}
 
-		var cache spotipyCache
-		if err := json.Unmarshal(data, &cache); err != nil {
+		token, err := tokenFromCacheJSON(data)
+		if err != nil {
 			continue
 		}
 
-		token := &oauth2.Token{
-			AccessToken:  cache.AccessToken,
-			TokenType:    cache.TokenType,
-			RefreshToken: cache.RefreshToken,
-			Expiry:       time.Unix(cache.ExpiresAt, 0),
-		}
-
-		// If expired but we have a refresh token, let oauth2 handle refresh
-		if token.RefreshToken != "" {
-			fmt.Printf("[*] Loaded cached token from %s\n", path)
-			return token, nil
-		}
-
-		// If not expired, use directly
-		if time.Now().Before(token.Expiry) {
-			fmt.Printf("[*] Loaded cached token from %s\n", path)
-			return token, nil
-		}
+		fmt.Printf("[*] Loaded cached token from %s\n", path)
+		return token, nil
 	}
 
 	return nil, fmt.Errorf("no valid cached token found")

