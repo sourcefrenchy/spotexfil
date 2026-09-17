@@ -1,4 +1,19 @@
+<div align="center">
+
+```
+███████╗██████╗  ██████╗ ████████╗███████╗██╗  ██╗███████╗██╗██╗
+██╔════╝██╔══██╗██╔═══██╗╚══██╔══╝██╔════╝╚██╗██╔╝██╔════╝██║██║
+███████╗██████╔╝██║   ██║   ██║   █████╗   ╚███╔╝ █████╗  ██║██║
+╚════██║██╔═══╝ ██║   ██║   ██║   ██╔══╝   ██╔██╗ ██╔══╝  ██║██║
+███████║██║     ╚██████╔╝   ██║   ███████╗██╔╝ ██╗██║     ██║███████╗
+╚══════╝╚═╝      ╚═════╝    ╚═╝   ╚══════╝╚═╝  ╚═╝╚═╝     ╚═╝╚══════╝
+```
+
+### Covert data exfiltration & C2 over Spotify playlist descriptions
+
 [![CodeQL](https://github.com/sourcefrenchy/spotexfil/actions/workflows/codeql-analysis.yml/badge.svg)](https://github.com/sourcefrenchy/spotexfil/actions/workflows/codeql-analysis.yml)
+
+</div>
 
 # SpotExfil
 
@@ -27,6 +42,8 @@ More info at [Exfiltration Series: SpotExfil](https://medium.com/@jeanmichel.amb
 - **Auto check-in** -- implants announce themselves, operator sees connections in real-time
 - **Modules**: shell (exec commands), exfil (read files), sysinfo (OS/network recon)
 - **Smart rate limiting** -- exponential backoff, human-readable error messages, auto-recovery
+- **Parallel uploads** -- bounded worker pool (4 workers) with per-chunk retries, ~4x faster large sends
+- **Cached cover traffic** -- filler-track artist lookup resolved once per process, not per playlist
 
 ### Infrastructure
 - **Standalone binary** -- no runtime needed, static Go build
@@ -268,11 +285,18 @@ Spotify rate limits: ~180 requests per rolling 30-second window per app.
 | | Before | After |
 |---|---|---|
 | API calls per poll | 1 listing + N GetPlaylist (80+ on a real account) = **81 calls** | 1 listing + client-side tag filter = **1-3 calls** |
+| API calls per exfil read/clean | 1 listing + N GetPlaylist = **81 calls** | 1 listing, description read client-side = **1-3 calls** |
+| API calls per playlist created | 1 create + search + top-tracks + add-tracks = **4 calls** | 1 create + 1 add-tracks (artist lookup cached once per process) = **2 calls** |
+| Large payload upload | Sequential, 100ms sleep per chunk | **4 parallel workers**, per-chunk retry with server-honored backoff |
 | Effective req/30s at --interval 30 | ~160 (near limit) | ~2 (well under) |
 | Min safe interval | 60s+ | 20s |
 | Write block behavior | Everything backs off, implant goes deaf | Reads keep polling, only writes back off independently |
 
-The `SimplePlaylist` listing already includes the `description` field. C2 playlists are identified by their encrypted HMAC tag prefix client-side — no extra `GetPlaylist` API call needed. Personal playlists (80+) are skipped with zero API cost.
+The `SimplePlaylist` listing already includes the `description` field. Both C2 playlists (encrypted HMAC tag prefix) and exfil payload playlists (zero-width marker) are identified client-side from the listing — no per-playlist `GetPlaylist` calls. Personal playlists (80+) are skipped with zero API cost. A full-details fetch only happens as a fallback when a listing description is empty.
+
+Filler-track cover traffic is resolved **once per process** (one artist search + one top-tracks call), then a shuffled subset of the cached track IDs is added to each playlist — previously 3 API calls per playlist created.
+
+Uploads use a **bounded worker pool** (4 workers) with per-chunk retries: a failed chunk is retried up to 3 times, honoring the server-provided `Retry-After` when present, and no longer aborts the whole payload.
 
 Read (polling for commands) and write (checkin, sending results) have **independent backoff timers**. A Spotify write block doesn't stop the implant from receiving and executing commands.
 
@@ -294,6 +318,7 @@ Test coverage includes:
 - **Forward secrecy**: full key exchange simulation, session isolation, forward secrecy property verification
 - **Protocol resilience**: raw encode/decode, master-key fallback, operator restart scenario, implant fallback decryption
 - **Module registry**: dynamic register/unregister, concurrent access (race detector)
+- **Operator concurrency**: shared-state locking (agents, session keys, history) verified with `-race`; history index, cap, and save debouncing
 - **Integration**: full C2 roundtrips, multi-command queue, channel isolation, cleanup
 - **Stress**: 100+ random payloads, concurrent encoding, edge cases
 - **Test vectors**: crypto validation against shared vectors in `go/internal/crypto/testdata/`
@@ -301,7 +326,7 @@ Test coverage includes:
 ## Limitations
 
 - ~1MB max payload (~2000 playlists)
-- Slow for large files (1 API call per 512-char chunk)
+- Large files take time (parallel workers help; still 1 playlist per 512-char chunk)
 - Spotify rate limits: ~180 req/30s rolling window, write blocks can escalate to 24h
 - C2 polling adds latency (configurable, default 20-60s)
 

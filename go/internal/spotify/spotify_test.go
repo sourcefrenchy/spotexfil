@@ -1,6 +1,7 @@
 package spotify
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -100,4 +101,39 @@ func containsHash(s string) bool {
 		}
 	}
 	return false
+}
+
+func TestRetryAfterFromErr(t *testing.T) {
+	if got := retryAfterFromErr(nil); got != 0 {
+		t.Errorf("nil error: got %d, want 0", got)
+	}
+	if got := retryAfterFromErr(fmt.Errorf("some random failure")); got != 0 {
+		t.Errorf("non-rate-limit error: got %d, want 0", got)
+	}
+	err := fmt.Errorf("spotify: rate limit exceeded, Retry will occur after: 42 s")
+	if got := retryAfterFromErr(err); got != 42 {
+		t.Errorf("rate-limit error: got %d, want 42", got)
+	}
+}
+
+func TestWritePlaylistsParallelEmpty(t *testing.T) {
+	// An empty spec list must complete immediately with no failures,
+	// and must not deadlock the worker pool.
+	c := &Client{}
+	if failures := c.writePlaylistsParallel(t.Context(), nil); failures != 0 {
+		t.Errorf("empty write: got %d failures, want 0", failures)
+	}
+}
+
+func TestFillerCacheTriedFlag(t *testing.T) {
+	// Without an API session, resolving filler tracks marks the cache
+	// as tried and returns nil (subsequent calls must not retry).
+	c := &Client{}
+	tracks := c.resolveFillerTracks(t.Context())
+	if tracks != nil {
+		t.Errorf("expected nil tracks without API session, got %v", tracks)
+	}
+	if !c.fillerTried {
+		t.Error("fillerTried should be set after first resolve attempt")
+	}
 }
