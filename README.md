@@ -53,6 +53,78 @@ More info at [Exfiltration Series: SpotExfil](https://medium.com/@jeanmichel.amb
 
 ## Architecture
 
+### How it works
+
+Spotify playlists are the mailbox: the operator and implant never talk to
+each other directly — they read and write encrypted chunks in playlist
+descriptions on a shared Spotify account, and delete each playlist right
+after reading it.
+
+```
+     OPERATOR                    SPOTIFY ACCOUNT                  IMPLANT
+  (c2-operator)             private playlists = mailbox        (c2-implant)
+        │                           │                               │
+        │                           │◄──── 1. checkin ──────────────│  jittered
+        │                           │   ("res" box, master key,     │  poll loop
+        │◄─── poll ─────────────────│    hostname, os, user,        │  starts
+        │    sees new agent         │    X25519 pubkey)             │
+        │                           │                               │
+        │──── 2. keyexchange ──────►│───── poll ───────────────────►│
+        │   ("cmd" box, master key, │                               │ 3. ECDH +
+        │    operator X25519 pubkey)│                               │    HKDF
+        │                           │                               │
+        │═════════ both sides now share a session key ══════════════│
+        │              (forward secrecy established)                │
+        │                           │                               │
+        │──── 4. command ──────────►│───── poll ───────────────────►│
+        │   ("cmd" box, session key,│                               │ 5. execute
+        │    seq, 5-min timestamp,  │                               │    module:
+        │    session binding)       │                               │    shell /
+        │                           │                               │    exfil /
+        │                           │◄──── 6. result ───────────────│    push /
+        │◄─── poll ─────────────────│   ("res" box, session key)    │    screenshot
+        │    7. decrypt, display,   │                               │
+        │    store in history       │                               │
+        │                           │                               │
+        ▼                playlists are deleted immediately          ▼
+                      after being read (both sides)
+```
+
+Every message — command, result, checkin — goes through the same pipeline:
+
+```
+  JSON ──► gzip ──► BLAKE2b ──► AES-256-GCM ──► base64 ──► split into
+   (1)      (2)       (3)           (4)           (5)      ≤300-char chunks
+                                                                  │
+                          one playlist per chunk                  ▼
+              ┌────────────────────────────────────────────────────────┐
+              │  description =                                         │
+              │  ┌──────────────────────┐ ┌──────────────────────────┐ │
+              │  │ HMAC tag (12 hex)    │ │ base64( AES-256-GCM(     │ │
+              │  │ rotates hourly,      │ │   {"c":channel,          │ │
+              │  │ identifies our       │ │    "i":chunk#,           │ │
+              │  │ playlists without    │ │    "seq":msg#}           │ │
+              │  │ decrypting           │ │   + chunk data ) )       │ │
+              │  └──────────────────────┘ └──────────────────────────┘ │
+              └────────────────────────────────────────────────────────┘
+
+  (1) message as JSON          (4) PBKDF2(master key) or raw session key
+  (2) gzip, skipped if no win  (5) the 512-char Spotify description limit
+  (3) integrity hash               is what caps chunks at ~300 chars
+```
+
+Why two encryption layers? The **message layer** (4) protects the payload
+end-to-end (master key before key exchange, X25519 session key after). The
+**chunk layer** protects the metadata (channel, chunk index, seq) with a
+fast HMAC-derived key, so a reader can identify and order chunks by tag
+prefix alone — one playlist-listing API call, no per-playlist fetches.
+
+File exfiltration mode (`send`/`receive`) uses the same pipeline without
+the C2 envelope: chunks are stored with a zero-width-space marker and
+`{"i":N}` ordering metadata, under innocuous cover playlist names.
+
+### Repository layout
+
 ```
 spotexfil/
 ├── go/
