@@ -1,3 +1,5 @@
+//go:build !noscreenshot
+
 package c2
 
 import (

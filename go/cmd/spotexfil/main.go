@@ -3,64 +3,23 @@ package main
 
 import (
 	"context"
-	crand "crypto/rand"
 	"fmt"
 	"io"
-	"math/big"
 	"os"
 	"strings"
 
 	"github.com/sourcefrenchy/spotexfil/internal/c2"
+	"github.com/sourcefrenchy/spotexfil/internal/crypto"
 	"github.com/sourcefrenchy/spotexfil/internal/encoding"
 	"github.com/sourcefrenchy/spotexfil/internal/shared"
 	"github.com/sourcefrenchy/spotexfil/internal/spotify"
 	"github.com/spf13/cobra"
 )
 
-var keyWords = []string{
-	"alpha", "bravo", "charlie", "delta", "echo", "foxtrot",
-	"golf", "hotel", "india", "juliet", "kilo", "lima",
-	"mike", "november", "oscar", "papa", "quebec", "romeo",
-	"sierra", "tango", "uniform", "victor", "whiskey", "xray",
-	"yankee", "zulu", "niner", "zero", "one", "two",
-	"three", "four", "five", "six", "seven", "eight",
-}
-
-// generatePassphrase generates a random 6-word passphrase using crypto/rand.
-func generatePassphrase() (string, error) {
-	words := make([]string, 6)
-	for i := range words {
-		idx, err := crand.Int(crand.Reader, big.NewInt(int64(len(keyWords))))
-		if err != nil {
-			return "", fmt.Errorf("crypto/rand failed: %w", err)
-		}
-		words[i] = keyWords[idx.Int64()]
-	}
-	return strings.Join(words, "-"), nil
-}
-
-// deliverSessionKey delivers the generated C2 session key: printed to
-// w (os.Stdout in production) unless quiet, and/or written to keyFile
-// with 0600 permissions. In quiet mode the key must never hit stdout
-// (scrollback/logs), so --key-file is required.
+// deliverSessionKey delegates to c2.DeliverSessionKey (shared with the
+// minimal implant binary). Kept as a thin wrapper for the CLI tests.
 func deliverSessionKey(key, keyFile string, quiet bool, w io.Writer) error {
-	if quiet && keyFile == "" {
-		return fmt.Errorf("--quiet requires --key-file so the session key is not printed to stdout")
-	}
-	if keyFile != "" {
-		if err := os.WriteFile(keyFile, []byte(key+"\n"), 0600); err != nil {
-			return fmt.Errorf("write key file: %w", err)
-		}
-	}
-	if quiet {
-		return nil
-	}
-	fmt.Fprintf(w, "[*] Session key: %s\n", key)
-	fmt.Fprintf(w, "[*] Use this key to start the operator: ./spotexfil c2-operator -k \"%s\"\n", key)
-	if keyFile != "" {
-		fmt.Fprintf(w, "[*] Session key written to %s (0600)\n", keyFile)
-	}
-	return nil
+	return c2.DeliverSessionKey(key, keyFile, quiet, w)
 }
 
 var version = "1.0.0"
@@ -211,7 +170,7 @@ func c2ImplantCmd() *cobra.Command {
 		Short: "Run C2 implant",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			// Auto-generate a random passphrase
-			key, err := generatePassphrase()
+			key, err := crypto.GeneratePassphrase()
 			if err != nil {
 				return fmt.Errorf("failed to generate key: %w", err)
 			}

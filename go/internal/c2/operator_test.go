@@ -1,3 +1,5 @@
+//go:build !implantonly
+
 package c2
 
 import (

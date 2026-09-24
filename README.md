@@ -169,10 +169,26 @@ redirect_uri = http://127.0.0.1:8888/callback
 
 ### Pre-built binaries (no runtime needed)
 
-Download the appropriate binary from `dist/`:
-- `spotexfil-darwin-arm64` -- macOS Apple Silicon
-- `spotexfil-linux-amd64` -- Linux x64
-- `spotexfil-windows-amd64.exe` -- Windows x64
+Download from `dist/`:
+
+| Variant | Contents | darwin | linux | windows |
+|---------|----------|--------|-------|---------|
+| **Full CLI** (`spotexfil-*`) | operator console + implant + exfil send/receive | 11.2 MB | 8.6 MB | 8.2 MB |
+| **Implant** (`spotexfil-implant-*`) | implant only, all modules (no operator/readline/cobra) | 9.9 MB | 8.1 MB | 7.6 MB |
+| **Implant-min** (`spotexfil-implant-min-*`) | implant without the screenshot module | 9.8 MB | 7.2 MB | 7.4 MB |
+| **Obfuscated** (`spotexfil-obf-*` / `-obf-implant-*`) | garble + per-seed IOCs | ~20 MB | ~17 MB | ~17 MB |
+
+The operator needs the **full CLI**; targets only need an **implant** variant.
+
+```bash
+make all                # Full CLI for all platforms
+make implant            # Minimal implant (no operator console)
+make implant-min        # Minimal implant without screenshot module
+make obfuscated         # Obfuscated full CLI (garble + per-seed IOCs)
+make obfuscated-implant # Obfuscated minimal implant — smallest deployable
+make test               # Run the test suite (with race detector)
+make lint               # go vet
+```
 
 ### Build from source
 
@@ -185,15 +201,20 @@ make obfuscated   # Opsec build: garble + per-seed IOCs (see below)
 
 ### Obfuscated builds
 
-`make obfuscated` produces `dist/spotexfil-obf-*` binaries hardened against static analysis:
+`make obfuscated` (full CLI) and `make obfuscated-implant` (minimal implant) produce hardened binaries:
 
-- **garble** scrambles package paths and function names, encrypts string literals, and strips module info (`go version -m` returns "unknown")
+- **garble** (with `-tiny -literals`, both validated against the full test suite) scrambles package paths and function names, encrypts string literals, and strips module info (`go version -m` returns "unknown")
 - **Per-seed IOCs**: `scripts/sanitize_protocol.py` rewrites the cover names, filler artists, and crypto labels in the embedded `protocol.json` with seed-derived values (restored after the build), so no two builds share static indicators — verified: zero occurrences of `spotexfil`, cover names, or label strings in the binary
 
 ```bash
-make obfuscated             # random seed
+make obfuscated             # random seed, full CLI
+make obfuscated-implant     # random seed, minimal implant
 make obfuscated SEED=xyz    # reproducible
+make upx-pack               # optional UPX pass on implant binaries (see note)
 ```
+
+> [!NOTE]
+> UPX cuts implant binaries by ~60% (9.8MB → ~3.5MB), but packed binaries are a classic AV heuristic. Use it for **transport size** (e.g. delivery through the `push` module), not for reduced detectability.
 
 > [!WARNING]
 > Operator and implants **must come from the same obfuscated build** — the sanitized crypto labels differ from stock builds and from other seeds.
