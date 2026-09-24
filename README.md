@@ -180,7 +180,23 @@ Download the appropriate binary from `dist/`:
 make all          # Cross-compile binaries for all platforms
 make test         # Run the test suite (with race detector)
 make lint         # go vet
+make obfuscated   # Opsec build: garble + per-seed IOCs (see below)
 ```
+
+### Obfuscated builds
+
+`make obfuscated` produces `dist/spotexfil-obf-*` binaries hardened against static analysis:
+
+- **garble** scrambles package paths and function names, encrypts string literals, and strips module info (`go version -m` returns "unknown")
+- **Per-seed IOCs**: `scripts/sanitize_protocol.py` rewrites the cover names, filler artists, and crypto labels in the embedded `protocol.json` with seed-derived values (restored after the build), so no two builds share static indicators — verified: zero occurrences of `spotexfil`, cover names, or label strings in the binary
+
+```bash
+make obfuscated             # random seed
+make obfuscated SEED=xyz    # reproducible
+```
+
+> [!WARNING]
+> Operator and implants **must come from the same obfuscated build** — the sanitized crypto labels differ from stock builds and from other seeds.
 
 ## Usage
 
@@ -366,8 +382,14 @@ Measures to minimize artifacts left on the implant host if an admin investigates
 | Quiet mode | `--quiet` suppresses non-error stdout (scrollback/syslog crumbs) |
 | Module allowlist | `--modules shell,exfil,...` disables noisy modules — e.g. `screenshot` triggers a macOS Screen Recording (TCC) prompt |
 | Shell env hardening | Commands run with `HISTFILE=/dev/null HISTSIZE=0` |
-| Trimmed binaries | Built with `-trimpath -buildvcs=false -s -w` — no local build paths or VCS metadata embedded |
+| Persistent shell worker | One long-lived shell child per implant — no `sh -c` exec-per-command telemetry burst; `cd`/env persist across commands |
+| Key delivery | `--key-file` writes the session key 0600 instead of stdout; `--quiet` requires it. Prefer `--token-file` over `SPOTIFY_TOKEN_JSON` — env vars are readable via /proc/PID/environ (Linux), `ps eww` (macOS), Process Explorer (Windows) |
+| Key zeroing | Session keys zeroed on rotation, reconnect, and exit (best-effort; Go strings can't be wiped) |
+| Obfuscated builds | `make obfuscated` — garble name/literal obfuscation + per-seed cover names and crypto labels (no shared IOCs between builds) |
+| Trimmed binaries | Built with `-trimpath -buildvcs=false -s -w` — no local build paths embedded |
 | Auto-generated keys | Session key never appears in argv/ps |
+| Key delivery | `--key-file` writes the session key 0600 instead of stdout; `--quiet` requires it. Prefer `--token-file` over `SPOTIFY_TOKEN_JSON` — env vars are readable via /proc/PID/environ (Linux), `ps eww` (macOS), Process Explorer (Windows) |
+| Key zeroing | Session keys zeroed on rotation, reconnect, and exit (best-effort; Go strings can't be wiped) |
 
 Note: this PoC hides traffic *content*, not *presence*. On a host where the user never runs Spotify, connections to `api.spotify.com` are themselves an anomaly.
 

