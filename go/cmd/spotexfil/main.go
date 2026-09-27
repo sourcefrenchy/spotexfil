@@ -103,18 +103,9 @@ func sendCmd() *cobra.Command {
 // sendViaCover embeds the encoded payload in a generated playlist cover
 // image and uploads it as a single playlist's cover.
 func sendViaCover(ctx context.Context, client *spotify.Client, payload string) error {
-	jpeg, err := stego.GenerateCover(time.Now().UnixNano())
+	stegoJPEG, err := embedCoverPayload(payload)
 	if err != nil {
-		return fmt.Errorf("generate cover: %w", err)
-	}
-	stegoJPEG, err := stego.Embed(jpeg, []byte(payload))
-	if err != nil {
-		if errors.Is(err, stego.ErrTooLarge) {
-			return fmt.Errorf("payload too large for cover channel: %d bytes encoded "+
-				"(cover capacity is ~%d KB — use the classic description channel)",
-				len(payload), (stego.MaxCoverSize-len(jpeg)-16)/1024)
-		}
-		return fmt.Errorf("embed: %w", err)
+		return err
 	}
 
 	markerSep := shared.Proto.Transport.MarkerSep
@@ -129,6 +120,25 @@ func sendViaCover(ctx context.Context, client *spotify.Client, payload string) e
 	fmt.Printf("[*] Data sent in one playlist cover (%d bytes payload, %d bytes image)\n",
 		len(payload), len(stegoJPEG))
 	return nil
+}
+
+// embedCoverPayload embeds an encoded payload into a generated cover
+// image, with a clear error when it exceeds the cover capacity.
+func embedCoverPayload(payload string) ([]byte, error) {
+	jpeg, err := stego.GenerateCover(time.Now().UnixNano())
+	if err != nil {
+		return nil, fmt.Errorf("generate cover: %w", err)
+	}
+	stegoJPEG, err := stego.Embed(jpeg, []byte(payload))
+	if err != nil {
+		if errors.Is(err, stego.ErrTooLarge) {
+			return nil, fmt.Errorf("payload too large for cover channel: %d bytes encoded "+
+				"(cover capacity is ~%d KB — use the classic description channel)",
+				len(payload), (stego.MaxCoverSize-len(jpeg)-16)/1024)
+		}
+		return nil, fmt.Errorf("embed: %w", err)
+	}
+	return stegoJPEG, nil
 }
 
 func receiveCmd() *cobra.Command {

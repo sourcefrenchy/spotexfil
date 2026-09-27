@@ -1,3 +1,5 @@
+//go:build !implantonly
+
 package main
 
 import (
@@ -6,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/sourcefrenchy/spotexfil/internal/stego"
 )
 
 func TestDeliverSessionKeyQuietRequiresKeyFile(t *testing.T) {
@@ -87,5 +91,39 @@ func TestDeliverSessionKeyNonQuietNoKeyFile(t *testing.T) {
 	}
 	if strings.Contains(out, "written to") {
 		t.Errorf("no key file given, but got write confirmation: %q", out)
+	}
+}
+
+func TestEmbedCoverPayloadRoundtrip(t *testing.T) {
+	payload := `{"m":"test","d":"hello cover channel"}`
+	jpeg, err := embedCoverPayload(payload)
+	if err != nil {
+		t.Fatalf("embedCoverPayload: %v", err)
+	}
+	// Valid JPEG with an extractable payload
+	if jpeg[0] != 0xFF || jpeg[1] != 0xD8 {
+		t.Error("output is not a JPEG (missing SOI)")
+	}
+	got, err := stego.Extract(jpeg)
+	if err != nil {
+		t.Fatalf("Extract: %v", err)
+	}
+	if string(got) != payload {
+		t.Errorf("roundtrip mismatch: got %q", got)
+	}
+	if len(jpeg) > stego.MaxCoverSize {
+		t.Errorf("image exceeds cover limit: %d bytes", len(jpeg))
+	}
+}
+
+func TestEmbedCoverPayloadTooLarge(t *testing.T) {
+	// Well beyond the ~200KB cover capacity
+	payload := strings.Repeat("A", 400*1024)
+	_, err := embedCoverPayload(payload)
+	if err == nil {
+		t.Fatal("expected too-large error")
+	}
+	if !strings.Contains(err.Error(), "too large for cover channel") {
+		t.Errorf("error should guide to the classic channel: %v", err)
 	}
 }
