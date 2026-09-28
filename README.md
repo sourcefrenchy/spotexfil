@@ -1,15 +1,6 @@
 <div align="center">
 
-```
-███████╗██████╗  ██████╗ ████████╗███████╗██╗  ██╗███████╗██╗██╗
-██╔════╝██╔══██╗██╔═══██╗╚══██╔══╝██╔════╝╚██╗██╔╝██╔════╝██║██║
-███████╗██████╔╝██║   ██║   ██║   █████╗   ╚███╔╝ █████╗  ██║██║
-╚════██║██╔═══╝ ██║   ██║   ██║   ██╔══╝   ██╔██╗ ██╔══╝  ██║██║
-███████║██║     ╚██████╔╝   ██║   ███████╗██╔╝ ██╗██║     ██║███████╗
-╚══════╝╚═╝      ╚═════╝    ╚═╝   ╚══════╝╚═╝  ╚═╝╚═╝     ╚═╝╚══════╝
-```
-
-### Covert data exfiltration & C2 over Spotify playlist descriptions
+<img src=".github/logo.png" alt="SpotExfil — covert data exfiltration & C2 over Spotify playlists" width="700">
 
 [![CodeQL](https://github.com/sourcefrenchy/spotexfil/actions/workflows/codeql-analysis.yml/badge.svg)](https://github.com/sourcefrenchy/spotexfil/actions/workflows/codeql-analysis.yml)
 
