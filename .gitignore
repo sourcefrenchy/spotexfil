@@ -6,3 +6,5 @@ payload.bin
 .spotexfil.conf
 dist/
 build/
+**/__pycache__/
+*.pyc
