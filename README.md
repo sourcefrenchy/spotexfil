@@ -406,6 +406,30 @@ to conserve messages, terminal resizes are forwarded (SIGWINCH), and the
 session runs with `HISTFILE=/dev/null`. Pair with `--live` for the most
 responsive experience; falls back to `ishell` if no PTY is available.
 
+Proof it's a real terminal, not a pipe — from the integration test
+(`go test -v -run PtyShowcase ./internal/c2/`):
+
+```
+[operator -> implant] open (cols=100 rows=30)
+[implant -> operator] open-ok
+
+[operator types] tty
+[terminal output]
+/dev/ttys005                          <- kernel allocated a real PTY device
+
+[operator types] test -t 0 && echo 'stdin IS a tty'
+[terminal output]
+stdin IS a tty                        <- bash confirms fd 0 is a terminal
+
+[operator types] echo "term=$TERM size=$(stty size)"
+[terminal output]
+term=xterm-256color size=30 100       <- TERM + window size as requested
+
+[operator resizes window] 132x43
+[terminal output]
+stty size -> 43 132                   <- resize reached the live PTY
+```
+
 ## Security Model
 
 ### Encryption
