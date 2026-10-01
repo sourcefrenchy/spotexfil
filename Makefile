@@ -22,7 +22,7 @@ GARBLE_SEED = $(shell printf '%s' '$(SEED)' | openssl base64)
 # garble must run as a HOST binary (go run would inherit GOOS and fail to
 # execute); `make obfuscated` auto-installs it to GOPATH/bin.
 GARBLE = $(shell go env GOPATH)/bin/garble
-PROTO = go/internal/shared/protocol.json
+PROTO = go/pkg/shared/protocol.json
 
 .PHONY: all darwin linux windows clean test lint build obfuscated obfuscated-implant garble-install implant implant-min upx-pack
 
