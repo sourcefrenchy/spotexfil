@@ -214,6 +214,25 @@ make upx-pack               # optional UPX pass on implant binaries (see note)
 > [!WARNING]
 > Operator and implants **must come from the same obfuscated build** — the sanitized crypto labels differ from stock builds and from other seeds.
 
+## C2 Framework Support
+
+SpotExfil works standalone (built-in operator console, see [Usage](#usage)) or
+as a transport for full C2 frameworks:
+
+| Framework | Integration | Status |
+|-----------|-------------|--------|
+| **[Mythic](https://github.com/its-a-feature/Mythic)** (SpecterOps) | `spotify` C2 Profile + `spotexfil` Payload Type — full Mythic UI, tasking, and operator workflow over playlist channels. Byte-exact AESPSK crypto interop, gRPC push streaming, cross-platform agent (macOS arm64, Linux x64, Windows x64). | ✅ Code + docs complete — see **[docs/MYTHIC.md](docs/MYTHIC.md)**. Upstream listing PR after lab validation. |
+| Sliver (Bishop Fox) | Possible via a custom implant transport (protobuf envelopes) | 🔭 Explored — not implemented |
+| Cobalt Strike (Fortra) | Would require Beacon protocol reimplementation | 🔭 Explored — not planned |
+
+**Why Mythic first:** it's the only major framework where third-party transports
+are a first-class, documented extension point — the profile plugs our
+`pkg/{spotify,protocol,crypto}` engine into Mythic's tasking pipeline without
+modifying Mythic itself, and payloads build straight from the Mythic UI.
+
+Want another framework? The transport layer (`go/pkg/`) is deliberately
+framework-agnostic — envelopes in, encrypted playlist chunks out.
+
 ## Usage
 
 ### End-to-end example: your first operation in 5 minutes
