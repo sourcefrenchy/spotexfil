@@ -6,7 +6,7 @@ import (
 	"crypto/rand"
 	"fmt"
 
-	"github.com/sourcefrenchy/spotexfil/internal/shared"
+	"github.com/sourcefrenchy/spotexfil/pkg/shared"
 )
 
 // Encrypt encrypts plaintext using AES-256-GCM with PBKDF2 key derivation.

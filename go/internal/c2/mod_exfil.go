@@ -6,7 +6,7 @@ import (
 	"os"
 	"unicode/utf8"
 
-	"github.com/sourcefrenchy/spotexfil/internal/shared"
+	"github.com/sourcefrenchy/spotexfil/pkg/shared"
 )
 
 // ExfilModule reads files and returns their contents.

@@ -3,7 +3,7 @@ package protocol
 import (
 	"testing"
 
-	"github.com/sourcefrenchy/spotexfil/internal/crypto"
+	"github.com/sourcefrenchy/spotexfil/pkg/crypto"
 )
 
 // --- EncodeMessageRaw / DecodeMessageRaw tests ---

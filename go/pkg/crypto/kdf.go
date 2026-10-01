@@ -5,7 +5,7 @@ package crypto
 import (
 	"crypto/sha256"
 
-	"github.com/sourcefrenchy/spotexfil/internal/shared"
+	"github.com/sourcefrenchy/spotexfil/pkg/shared"
 	"golang.org/x/crypto/pbkdf2"
 )
 

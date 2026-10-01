@@ -14,9 +14,9 @@ import (
 	"strings"
 
 	"github.com/sourcefrenchy/spotexfil/internal/c2"
-	"github.com/sourcefrenchy/spotexfil/internal/crypto"
-	"github.com/sourcefrenchy/spotexfil/internal/shared"
-	"github.com/sourcefrenchy/spotexfil/internal/spotify"
+	"github.com/sourcefrenchy/spotexfil/pkg/crypto"
+	"github.com/sourcefrenchy/spotexfil/pkg/shared"
+	"github.com/sourcefrenchy/spotexfil/pkg/spotify"
 )
 
 var version = "dev"

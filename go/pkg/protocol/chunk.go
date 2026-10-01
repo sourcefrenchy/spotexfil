@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sourcefrenchy/spotexfil/internal/crypto"
-	"github.com/sourcefrenchy/spotexfil/internal/shared"
+	"github.com/sourcefrenchy/spotexfil/pkg/crypto"
+	"github.com/sourcefrenchy/spotexfil/pkg/shared"
 )
 
 // ComputeC2Tag derives a time-windowed 12-char hex tag from the encryption key.

@@ -9,9 +9,9 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/sourcefrenchy/spotexfil/internal/crypto"
-	"github.com/sourcefrenchy/spotexfil/internal/encoding"
-	"github.com/sourcefrenchy/spotexfil/internal/shared"
+	"github.com/sourcefrenchy/spotexfil/pkg/crypto"
+	"github.com/sourcefrenchy/spotexfil/pkg/encoding"
+	"github.com/sourcefrenchy/spotexfil/pkg/shared"
 )
 
 // Channel discriminators.

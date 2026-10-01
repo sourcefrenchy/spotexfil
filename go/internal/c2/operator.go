@@ -18,10 +18,10 @@ import (
 	"time"
 
 	"github.com/chzyer/readline"
-	"github.com/sourcefrenchy/spotexfil/internal/crypto"
-	"github.com/sourcefrenchy/spotexfil/internal/protocol"
-	"github.com/sourcefrenchy/spotexfil/internal/shared"
-	"github.com/sourcefrenchy/spotexfil/internal/spotify"
+	"github.com/sourcefrenchy/spotexfil/pkg/crypto"
+	"github.com/sourcefrenchy/spotexfil/pkg/protocol"
+	"github.com/sourcefrenchy/spotexfil/pkg/shared"
+	"github.com/sourcefrenchy/spotexfil/pkg/spotify"
 )
 
 // Cute names assigned to agents on first connect (50 unique).

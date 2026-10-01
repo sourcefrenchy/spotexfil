@@ -10,7 +10,7 @@ import (
 	"image/jpeg"
 
 	"github.com/kbinani/screenshot"
-	"github.com/sourcefrenchy/spotexfil/internal/shared"
+	"github.com/sourcefrenchy/spotexfil/pkg/shared"
 )
 
 // ScreenshotModule captures the host's screen and returns it as a base64 JPEG.

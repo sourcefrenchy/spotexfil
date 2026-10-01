@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/sourcefrenchy/spotexfil/internal/shared"
+	"github.com/sourcefrenchy/spotexfil/pkg/shared"
 )
 
 func TestPushEmptyPath(t *testing.T) {

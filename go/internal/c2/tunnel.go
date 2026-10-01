@@ -8,7 +8,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/sourcefrenchy/spotexfil/internal/protocol"
+	"github.com/sourcefrenchy/spotexfil/pkg/protocol"
 )
 
 // Tunnel frame operations. Frames travel as C2 messages with

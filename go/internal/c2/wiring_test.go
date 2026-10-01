@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sourcefrenchy/spotexfil/internal/protocol"
+	"github.com/sourcefrenchy/spotexfil/pkg/protocol"
 )
 
 // TestRouteTunnelLocked verifies the PollResults tunnel-routing hook:

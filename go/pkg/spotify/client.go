@@ -15,8 +15,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/sourcefrenchy/spotexfil/internal/protocol"
-	"github.com/sourcefrenchy/spotexfil/internal/shared"
+	"github.com/sourcefrenchy/spotexfil/pkg/protocol"
+	"github.com/sourcefrenchy/spotexfil/pkg/shared"
 	spotifyapi "github.com/zmb3/spotify/v2"
 	spotifyauth "github.com/zmb3/spotify/v2/auth"
 	"golang.org/x/oauth2"

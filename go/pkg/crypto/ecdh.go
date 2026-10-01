@@ -6,7 +6,7 @@ import (
 	"crypto/sha256"
 	"io"
 
-	"github.com/sourcefrenchy/spotexfil/internal/shared"
+	"github.com/sourcefrenchy/spotexfil/pkg/shared"
 	"golang.org/x/crypto/hkdf"
 )
 

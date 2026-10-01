@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sourcefrenchy/spotexfil/internal/protocol"
+	"github.com/sourcefrenchy/spotexfil/pkg/protocol"
 )
 
 func TestTunnelFrameRoundtrip(t *testing.T) {

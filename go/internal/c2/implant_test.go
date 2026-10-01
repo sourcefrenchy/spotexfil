@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/sourcefrenchy/spotexfil/internal/protocol"
+	"github.com/sourcefrenchy/spotexfil/pkg/protocol"
 )
 
 // newTestImplant builds an implant for tests (nil client is fine:

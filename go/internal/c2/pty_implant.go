@@ -8,7 +8,7 @@ import (
 	"sync/atomic"
 
 	"github.com/creack/pty"
-	"github.com/sourcefrenchy/spotexfil/internal/protocol"
+	"github.com/sourcefrenchy/spotexfil/pkg/protocol"
 )
 
 const (
