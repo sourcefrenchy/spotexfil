@@ -71,8 +71,8 @@ func TestPtyShowcase(t *testing.T) {
 
 	// 2. Prove it's a REAL terminal, not a pipe
 	commands := []string{
-		"tty\n",                                   // shows /dev/ttysXXX — pipes can't do this
-		"test -t 0 && echo 'stdin IS a tty'\n",    // -t test on fd 0
+		"tty\n",                                // shows /dev/ttysXXX — pipes can't do this
+		"test -t 0 && echo 'stdin IS a tty'\n", // -t test on fd 0
 		"echo \"term=$TERM size=$(stty size)\"\n", // TERM + window size
 		"uname -sm\n",
 		"echo $((6*7))\n",
