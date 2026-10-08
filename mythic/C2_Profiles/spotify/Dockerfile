@@ -1,24 +1,23 @@
 # Mythic C2 profile container for the "spotify" profile.
 #
-# The container needs a copy of the spotexfil Go module (the transport
-# library lives in this repo's go/ directory). Build from the REPO ROOT:
+# mythic-cli builds with THIS directory as the docker context, so the
+# spotexfil Go module must be staged here first:
 #
-#   docker build -f mythic/C2_Profiles/spotify/Dockerfile -t spotify-c2 .
+#   ./stage.sh          # copies <repo>/go -> ./spotexfil_src
 #
-# The go.mod `replace` directive points at ../../../go for local development;
-# it is rewritten below (via sed) to the in-context copy.
+# The go.mod `replace` directive (../../../go for local dev) is rewritten
+# below to the in-context copy.
 
-FROM golang:1.23 AS builder
-
-WORKDIR /build
+FROM golang:1.26-bookworm AS builder
 
 # Copy the spotexfil transport module and the profile container source.
-COPY go/ /spotexfil/
-COPY mythic/C2_Profiles/spotify/ /build/
+COPY spotexfil_src/ /spotexfil/
+COPY go.mod go.sum main.go /build/
+COPY spotify/ /build/spotify/
 
 # Point the replace directive at the in-context copy of spotexfil.
-RUN sed -i '' -e 's#=> ../../../go#=> /spotexfil#' go.mod 2>/dev/null || \
-    sed -i -e 's#=> ../../../go#=> /spotexfil#' go.mod
+WORKDIR /build
+RUN sed -i -e 's#=> ../../../go#=> /spotexfil#' go.mod
 
 RUN go mod tidy && CGO_ENABLED=0 go build -o /spotify_server .
 

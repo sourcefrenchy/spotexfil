@@ -25,6 +25,7 @@ func Definition() c2structs.C2Profile {
 		Author:              "@sourcefrenchy",
 		IsP2p:               false,
 		IsServerRouted:      true,
+		ServerBinaryPath:    "/spotify_server", // this binary IS the server (SDK requires the field)
 		SemVer:              "0.1.0",
 		ConfigCheckFunction: configCheck,
 		OPSECCheckFunction:  opsecCheck,
